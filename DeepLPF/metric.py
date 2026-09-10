@@ -24,7 +24,7 @@ import os
 import torch
 import matplotlib.pyplot as plt
 from torch.autograd import Variable
-from util import ImageProcessing
+from util import ImageProcessing, get_device
 from skimage.metrics import structural_similarity as ssim
 import logging
 
@@ -73,14 +73,32 @@ class Evaluator():
 
         # switch model to evaluation mode
         net.eval()
-        net.cuda()
+        device = get_device()
+        net.to(device)
 
         with torch.no_grad():
             for batch_num, data in enumerate(self.data_loader, 0):
 
-                input_img_batch, output_img_batch, name = Variable(data['input_img'], requires_grad=False).cuda(), Variable(data['output_img'],
-                                                                                                   requires_grad=False).cuda(), \
-                    data['name']
+                input_img_batch = data['input_img'].to(device)
+                name = data['name']
+
+                # Inference over a user's own photographs has no retouched
+                # target, so there is nothing to compute a loss, PSNR or SSIM
+                # against; enhance the image, save it, and move on.
+                if 'output_img' not in data:
+                    img = torch.clamp(input_img_batch, 0, 1)
+                    net_output_img_example = torch.clamp(net(img), 0, 1)
+                    net_output_img_example_rgb = (
+                        net_output_img_example[0, 0:3, :, :].cpu().numpy() * 255
+                    ).astype('uint8')
+                    plt.imsave(out_dirpath + "/" + name[0].split(".")[0] + "_" +
+                               self.split_name.upper() + ".jpg",
+                               ImageProcessing.swapimdims_3HW_HW3(net_output_img_example_rgb))
+                    examples += batch_size
+                    num_batches += 1
+                    continue
+
+                output_img_batch = data['output_img'].to(device)
                 input_img_batch = input_img_batch.unsqueeze(0)
 
                 for i in range(0, input_img_batch.shape[0]):
@@ -121,7 +139,7 @@ class Evaluator():
                     net_output_img_example_rgb = np.clip(
                         net_output_img_example_rgb, 0, 1)
 
-                    running_loss += loss.data[0]
+                    running_loss += loss.item()
                     examples += batch_size
                     num_batches += 1
 
@@ -157,6 +175,9 @@ class Evaluator():
                     del output_img_batch_numpy
                     del input_img_example
                     del output_img_batch
+
+        if num_batches == 0:
+            return 0.0, 0.0, 0.0
 
         psnr_avg = psnr_avg / num_batches
         ssim_avg = ssim_avg / num_batches

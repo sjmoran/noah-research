@@ -35,6 +35,7 @@ import torchvision.transforms as transforms
 import torch
 import time
 from data import Adobe5kDataLoader, Dataset
+from util import get_device
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib
 import numpy as np
@@ -44,19 +45,7 @@ matplotlib.use('agg')
 
 def main():
 
-    print("*** Before running this code ensure you keep the default batch size of 1. The code has not been engineered to support higher batch sizes. See README for more detail. Remove the exit() statement to use code. ***")
-    exit()
-
-    writer = SummaryWriter()
-
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    log_dirpath = "./log_" + timestamp
-    os.mkdir(log_dirpath)
-
-    handlers = [logging.FileHandler(
-        log_dirpath + "/deep_lpf.log"), logging.StreamHandler()]
-    logging.basicConfig(
-        level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s', handlers=handlers)
+    print("*** This code is designed for a batch size of 1. See README for more detail. ***")
 
     parser = argparse.ArgumentParser(
         description="Train the DeepLPF neural network on image pairs")
@@ -72,22 +61,55 @@ def main():
         "--inference_img_dirpath", required=False,
         help="Directory containing images to run through a saved DeepLPF model instance", default=None)
     parser.add_argument(
-        "--training_img_dirpath", required=True,
-        help="Directory containing images to train a DeepLPF model instance", default="/home/sjm213/adobe5k/adobe5k/")
+        "--training_img_dirpath", required=False,
+        help="Directory containing images to train a DeepLPF model instance (required for training)",
+        default="/home/sjm213/adobe5k/adobe5k/")
     parser.add_argument(
         "--inference_img_list_path", required=False,
         help="Plain text file containing the names of the images to inference")
     parser.add_argument(
-        "--train_img_list_path", required=True,
-        help="Plain text file containing the names of the training images")
+        "--train_img_list_path", required=False,
+        help="Plain text file containing the names of the training images (required for training)")
     parser.add_argument(
-        "--valid_img_list_path", required=True,
-        help="Plain text file containing the names of the validation images")
+        "--valid_img_list_path", required=False,
+        help="Plain text file containing the names of the validation images (required for training)")
     parser.add_argument(
         "--test_img_list_path", required=False,
         help="Plain text file containing the names of the test images")
 
     args = parser.parse_args()
+
+    is_inference = (args.checkpoint_filepath is not None) and (
+        args.inference_img_dirpath is not None)
+
+    if not is_inference:
+        # The training path needs the list files; argparse used to enforce
+        # them with required=True, which rejected the inference command
+        # documented in the README.
+        missing = [name for name in ("train_img_list_path", "valid_img_list_path",
+                                     "test_img_list_path", "training_img_dirpath")
+                   if getattr(args, name) is None]
+        if missing:
+            parser.error(
+                "training requires --" + ", --".join(missing) +
+                "; for inference pass both --checkpoint_filepath and --inference_img_dirpath")
+
+    # Created after argparse so that --help, and any usage error, does not
+    # leave an empty log directory and a runs/ directory behind.
+    timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    log_dirpath = "./log_" + timestamp
+    os.makedirs(log_dirpath, exist_ok=True)
+
+    handlers = [logging.FileHandler(
+        log_dirpath + "/deep_lpf.log"), logging.StreamHandler()]
+    logging.basicConfig(
+        level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s', handlers=handlers)
+
+    writer = SummaryWriter()
+
+    device = get_device()
+    logging.info('Device: ' + str(device))
+
     num_epoch = args.num_epoch
     valid_every = args.valid_every
     checkpoint_filepath = args.checkpoint_filepath
@@ -112,7 +134,7 @@ def main():
 
     
 
-    if (checkpoint_filepath is not None) and (inference_img_dirpath is not None):
+    if is_inference:
 
         '''
         inference_img_dirpath: the actual filepath should have "input" in the name an in the level above where the images 
@@ -125,13 +147,15 @@ def main():
         '''
         inference_data_loader = Adobe5kDataLoader(data_dirpath=inference_img_dirpath,
                                                   img_ids_filepath=inference_img_list_path)
-        inference_data_dict = inference_data_loader.load_data()
+        # Enhancing your own photographs means there is no retouched target to
+        # compare against, so targets are optional on this path.
+        inference_data_dict = inference_data_loader.load_data(require_output=False)
         inference_dataset = Dataset(data_dict=inference_data_dict,
                                     transform=transforms.Compose([transforms.ToTensor()]), normaliser=1,
                                     is_inference=True)
 
         inference_data_loader = torch.utils.data.DataLoader(inference_dataset, batch_size=1, shuffle=False,
-                                                            num_workers=6)
+                                                            num_workers=0)
 
         '''
         Performs inference on all the images in inference_img_dirpath
@@ -140,7 +164,9 @@ def main():
             "Performing inference with images in directory: " + inference_img_dirpath)
 
         net = model.DeepLPFNet()
-        net.load_state_dict(torch.load(checkpoint_filepath))
+        net.load_state_dict(torch.load(
+            checkpoint_filepath, map_location=device))
+        net.to(device)
         net.eval()
 
         criterion = model.DeepLPFLoss()
@@ -169,14 +195,22 @@ def main():
         testing_dataset = Dataset(data_dict=testing_data_dict, normaliser=1,is_valid=True)
 
         training_data_loader = torch.utils.data.DataLoader(training_dataset, batch_size=1, shuffle=True,
-                                                       num_workers=6)
+                                                       num_workers=0)
         testing_data_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=1, shuffle=False,
-                                                      num_workers=6)
+                                                      num_workers=0)
         validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=1,
                                                          shuffle=False,
-                                                         num_workers=6)
+                                                         num_workers=0)
         net = model.DeepLPFNet()
-        net.cuda(0)
+
+        # --checkpoint_filepath was accepted on the training path but never
+        # read, so a fine-tuning run silently started from random weights.
+        if checkpoint_filepath is not None:
+            logging.info('Resuming from checkpoint: ' + str(checkpoint_filepath))
+            net.load_state_dict(torch.load(
+                checkpoint_filepath, map_location=device))
+
+        net.to(device)
 
         logging.info('######### Network created #########')
         logging.info('Architecture:\n' + str(net))
@@ -215,10 +249,8 @@ def main():
             
             for batch_num, data in enumerate(training_data_loader, 0):
 
-                input_img_batch, gt_img_batch, _ = Variable(data['input_img'],
-                                                                       requires_grad=False).cuda(), Variable(data['output_img'],
-                                                                                                             requires_grad=False).cuda(), data[
-                    'name']
+                input_img_batch = data['input_img'].to(device)
+                gt_img_batch = data['output_img'].to(device)
 
                 start_time = time.time()
                 net_img_batch = net(input_img_batch)
@@ -232,11 +264,11 @@ def main():
                 loss.backward()
                 optimizer.step()
 
-                running_loss += loss.data[0]
+                running_loss += loss.item()
                 examples += batch_size
                 total_examples+=batch_size
 
-                writer.add_scalar('Loss/train', loss.data[0], total_examples)
+                writer.add_scalar('Loss/train', loss.item(), total_examples)
 
             logging.info('[%d] train loss: %.15f' %
                          (epoch + 1, running_loss / examples))
@@ -251,12 +283,8 @@ def main():
 
                 net.eval()
 
-                input_img_batch, output_img_batch, category = Variable(
-                    data['input_img'],
-                    requires_grad=False).cuda(), Variable(data['output_img'],
-                                                         requires_grad=False).cuda(), \
-                    data[
-                    'name']
+                input_img_batch = data['input_img'].to(device)
+                output_img_batch = data['output_img'].to(device)
 
                 net_output_img_batch = net(
                     input_img_batch)
@@ -267,11 +295,11 @@ def main():
 
                 loss = criterion(net_output_img_batch, output_img_batch)
 
-                running_loss += loss.data[0]
+                running_loss += loss.item()
                 examples += batch_size
                 total_examples+=batch_size
 
-                writer.add_scalar('Loss/train', loss.data[0], total_examples)
+                writer.add_scalar('Loss/train', loss.item(), total_examples)
 
             logging.info('[%d] valid loss: %.15f' %
                          (epoch + 1, running_loss / examples))
@@ -294,18 +322,15 @@ def main():
 
                     logging.info(
                         "Validation PSNR has increased. Saving the more accurate model to file: " + 'deeplpf_validpsnr_{}_validloss_{}_testpsnr_{}_testloss_{}_epoch_{}_model.pt'.format(valid_psnr,
-                                                                                                                                                                                         valid_loss.tolist()[0], test_psnr, test_loss.tolist()[
-                                                                                                                                                                                             0],
+                                                                                                                                                                                         valid_loss, test_psnr, test_loss,
                                                                                                                                                                                          epoch))
 
                     best_valid_psnr = valid_psnr
                     snapshot_prefix = os.path.join(
                         log_dirpath, 'deeplpf')
                     snapshot_path = snapshot_prefix + '_validpsnr_{}_validloss_{}_testpsnr_{}_testloss_{}_epoch_{}_model.pt'.format(valid_psnr,
-                                                                                                                                    valid_loss.tolist()[
-                                                                                                                                        0],
-                                                                                                                                    test_psnr, test_loss.tolist()[
-                                                                                                                                        0],
+                                                                                                                                    valid_loss,
+                                                                                                                                    test_psnr, test_loss,
                                                                                                                                     epoch)
                     torch.save(net.state_dict(), snapshot_path)
 
