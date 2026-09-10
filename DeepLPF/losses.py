@@ -34,18 +34,15 @@ class DeepLPFLoss(nn.Module):
     over the batch.
     """
 
-    def __init__(self, ssim_window_size=5, alpha=0.5):
+    def __init__(self, ssim_window_size=5):
         """Initialisation of the DeepLPF loss function
 
         :param ssim_window_size: size of averaging window for SSIM
-        :param alpha: unused; retained for backward compatibility of the
-            constructor signature (the L1/MS-SSIM weighting is fixed in forward)
         :returns: N/A
         :rtype: N/A
 
         """
         super(DeepLPFLoss, self).__init__()
-        self.alpha = alpha
         self.ssim_window_size = ssim_window_size
         # Per-(device, dtype) caches of the constant tensors the loss uses, so
         # they are copied to the device once rather than on every call.

@@ -48,7 +48,7 @@ class EllipticalFilter(nn.Module):
         self.elliptical_layer5 = ConvBlock(num_out_channels, num_out_channels)
         self.elliptical_layer6 = MaxPoolBlock()
         self.elliptical_layer7 = ConvBlock(num_out_channels, num_out_channels)
-        self.elliptical_layer8 = GlobalPoolingBlock(2)
+        self.elliptical_layer8 = GlobalPoolingBlock()
         self.fc_elliptical = torch.nn.Linear(
             num_out_channels, 24)
         self.upsample = torch.nn.Upsample(size=(300, 300), mode='bilinear',align_corners=False)
@@ -124,13 +124,6 @@ class EllipticalFilter(nn.Module):
         :rtype: Tensor
 
         """
-
-        # The two eps parameters are used to avoid numerical issues in the learning
-        eps2 = 1e-7
-        eps1 = 1e-10
-
-        # max_scale is the maximum an ellipse can scale the image R,G,B values by
-        max_scale = 2
 
         feat_elliptical = torch.cat((feat, img), 1)
         feat_elliptical = self.upsample(feat_elliptical)

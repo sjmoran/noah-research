@@ -30,12 +30,11 @@ class CubicFilter(nn.Module):
     and a fully-connected regressor. The input is first resized to 300x300.
     """
 
-    def __init__(self, num_in_channels=64, num_out_channels=64, batch_size=1):
+    def __init__(self, num_in_channels=64, num_out_channels=64):
         """Build the cubic-filter branch.
 
         :param num_in_channels: number of input feature-map channels
         :param num_out_channels: number of channels used by the conv stack
-        :param batch_size: image batch size (only 1 is supported)
         :returns: N/A
         :rtype: N/A
 
@@ -49,7 +48,7 @@ class CubicFilter(nn.Module):
         self.cubic_layer5 = ConvBlock(num_out_channels, num_out_channels)
         self.cubic_layer6 = MaxPoolBlock()
         self.cubic_layer7 = ConvBlock(num_out_channels, num_out_channels)
-        self.cubic_layer8 = GlobalPoolingBlock(2)
+        self.cubic_layer8 = GlobalPoolingBlock()
         self.fc_cubic = torch.nn.Linear(
             num_out_channels, 60)  # cubic
         self.upsample = torch.nn.Upsample(size=(300, 300), mode='bilinear',align_corners=False)

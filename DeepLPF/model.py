@@ -46,19 +46,16 @@ from losses import DeepLPFLoss  # noqa: F401
 class DeepLPFParameterPrediction(nn.Module):
     import torch.nn.functional as F
 
-    def __init__(self, num_in_channels=64, num_out_channels=64, batch_size=1):
+    def __init__(self, num_in_channels=64, num_out_channels=64):
         """Initialisation function
 
         :param num_in_channels:  Number of input feature maps
         :param num_out_channels: Number of output feature maps
-        :param batch_size: Size of image batch
         :returns: N/A
         :rtype: N/A
 
         """
         super(DeepLPFParameterPrediction, self).__init__()
-        self.num_in_channels = num_in_channels
-        self.num_out_channels = num_out_channels
         self.cubic_filter = CubicFilter()
         self.graduated_filter = GraduatedFilter()
         self.elliptical_filter = EllipticalFilter()

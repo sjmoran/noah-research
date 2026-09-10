@@ -48,7 +48,7 @@ class GraduatedFilter(nn.Module):
         self.graduated_layer5 = ConvBlock(num_out_channels, num_out_channels)
         self.graduated_layer6 = MaxPoolBlock()
         self.graduated_layer7 = ConvBlock(num_out_channels, num_out_channels)
-        self.graduated_layer8 = GlobalPoolingBlock(2)
+        self.graduated_layer8 = GlobalPoolingBlock()
         self.fc_graduated = torch.nn.Linear(
             num_out_channels, 24)
         self.upsample = torch.nn.Upsample(size=(300, 300), mode='bilinear',align_corners=False)
@@ -101,7 +101,6 @@ class GraduatedFilter(nn.Module):
         # and selected per image with torch.where; the clamp bounds (which depend
         # only on factor >= 1) are likewise applied element-wise.
         f = factor
-        inv = (invert == 1)
         fac_ge1 = (factor >= 1)
 
         # Every branch has the form  base + (A / d1) * top_line + (B / d2) * top_line

@@ -43,15 +43,17 @@ class Block(nn.Module):
 
 class ConvBlock(Block, nn.Module):
 
-    def __init__(self, num_in_channels, num_out_channels, stride=1):
+    def __init__(self, num_in_channels, num_out_channels):
         """Initialise function for the higher level convolution block
 
-        :param in_channels:
-        :param out_channels:
-        :param stride:
-        :param padding:
-        :returns:
-        :rtype:
+        The stride is 2: this took a `stride` argument that conv3x3 was never
+        given, so every caller's value was silently ignored and the stride was
+        always 2. No caller passed one.
+
+        :param num_in_channels: number of input channels
+        :param num_out_channels: number of output channels
+        :returns: N/A
+        :rtype: N/A
 
         """
         super(Block, self).__init__()
@@ -97,9 +99,13 @@ class MaxPoolBlock(Block, nn.Module):
 
 class GlobalPoolingBlock(Block, nn.Module):
 
-    def __init__(self, receptive_field):
-        """Implementation of the global pooling block. Takes the average over a 2D receptive field.
-        :param receptive_field:
+    def __init__(self):
+        """Implementation of the global pooling block.
+
+        Takes the average over the whole feature map, which is what makes the
+        parameter predictors resolution agnostic. This took a
+        `receptive_field` argument that nothing read; every caller passed 2.
+
         :returns: N/A
         :rtype: N/A
 
