@@ -24,8 +24,18 @@ import torch
 import sys
 from PIL import Image
 from skimage.metrics import structural_similarity as ssim
+import inspect
 
 np.set_printoptions(threshold=sys.maxsize)
+
+# scikit-image >= 0.19 renamed structural_similarity's `multichannel=True`
+# argument to `channel_axis`, and removed the old name in 0.23. Detect which
+# this installation takes so the code works across versions. The images passed
+# to SSIM are HxWx3, so the channel axis is the last one.
+if "channel_axis" in inspect.signature(ssim).parameters:
+    _SSIM_MULTICHANNEL_KWARGS = {"channel_axis": -1}
+else:  # older scikit-image, e.g. the previously pinned 0.18.1
+    _SSIM_MULTICHANNEL_KWARGS = {"multichannel": True}
 
 
 def get_device():
@@ -229,7 +239,8 @@ class ImageProcessing(object):
                 image_batchA[i, 0:3, :, :])
             imageB = ImageProcessing.swapimdims_3HW_HW3(
                 image_batchB[i, 0:3, :, :])
-            ssim_val += ssim(imageA, imageB, data_range=imageA.max() - imageA.min(), multichannel=True,
-                             gaussian_weights=True, win_size=11)
+            ssim_val += ssim(imageA, imageB, data_range=imageA.max() - imageA.min(),
+                             gaussian_weights=True, win_size=11,
+                             **_SSIM_MULTICHANNEL_KWARGS)
 
         return ssim_val / num_images
