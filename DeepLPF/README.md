@@ -194,7 +194,7 @@ year = {2020}
 
 ### License
 
-BSD-3-Clause License
+MIT License. See [LICENSE](LICENSE).
 
 ### Contributions
 

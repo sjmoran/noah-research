@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 #Copyright (C) 2020. Huawei Technologies Co., Ltd. All rights reserved.
 
-#This program is free software; you can redistribute it and/or modify it under the terms of the BSD 0-Clause License.
+#This program is free software; you can redistribute it and/or modify it under the terms of the MIT License.
 
-#This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD 0-Clause License for more details.
+#This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the MIT License for more details.
 """The training loss of Sec. 3.4, Eq. 8, and the MS-SSIM it is built on.
 
 The loss is an L1 term in CIELab plus a weighted MS-SSIM term on the lightness
