@@ -4,20 +4,18 @@
 #This program is free software; you can redistribute it and/or modify it under the terms of the BSD 0-Clause License.
 
 #This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD 0-Clause License for more details.
-'''
-This is a PyTorch implementation of the CVPR 2020 paper:
-"Deep Local Parametric Filters for Image Enhancement": https://arxiv.org/abs/2003.13985
+"""The three local parametric filters of Sec. 3.2, gathered for import.
 
-Please cite the paper if you use this code
+* :class:`CubicFilter`      polynomial ("cubic-20") filter, Sec. 3.2.4, Eq. 6
+* :class:`GraduatedFilter`  graduated filter, Sec. 3.2.2, Eqs. 1-3
+* :class:`EllipticalFilter` elliptical filter, Sec. 3.2.3, Eq. 4
 
-Import surface for the three parametric filter heads and the binarisation
-layer, so that a caller can `from filters import CubicFilter` without needing
-to know which module each one lives in.
-'''
+Each lives in its own module; this one re-exports them, together with the
+shared pieces in :mod:`filtercommon`, so that ``filters.CubicFilter`` and the
+rest keep resolving.
+"""
 from cubic import CubicFilter  # noqa: F401
 from elliptical import EllipticalFilter  # noqa: F401
-from filtercommon import BinaryLayer, SignSTE  # noqa: F401
+from filtercommon import (_GRID_CACHE, BinaryLayer, SignSTE,  # noqa: F401
+                          _coord_grid_powers, _coord_grids)
 from graduated import GraduatedFilter  # noqa: F401
-
-__all__ = ['BinaryLayer', 'CubicFilter', 'EllipticalFilter',
-           'GraduatedFilter', 'SignSTE']

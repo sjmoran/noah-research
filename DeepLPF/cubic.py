@@ -4,29 +4,39 @@
 #This program is free software; you can redistribute it and/or modify it under the terms of the BSD 0-Clause License.
 
 #This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD 0-Clause License for more details.
-'''
-This is a PyTorch implementation of the CVPR 2020 paper:
-"Deep Local Parametric Filters for Image Enhancement": https://arxiv.org/abs/2003.13985
+"""The polynomial ("cubic-20") filter of Sec. 3.2.4, Eq. 6.
 
-Please cite the paper if you use this code
-
-The polynomial ("cubic-20") filter of Sec. 3.2.4, Eq. 6.
-'''
+It predicts the coefficients of a cubic polynomial in pixel intensity and image
+coordinates, which is the global tone and colour curve applied to Y1.
+"""
 import torch
 import torch.nn as nn
-from torch.autograd import Variable
 
 from blocks import ConvBlock, GlobalPoolingBlock, MaxPoolBlock
+from filtercommon import _coord_grid_powers
 
 
 class CubicFilter(nn.Module):
+    """Cubic-polynomial ("cubic-20") filter branch of DeepLPF (paper Sec. 3.2.4, Eq. 6).
+
+    Regresses 60 coefficients (20 per RGB channel, ``{A..T}`` in Eq. 6) from the
+    backbone features and evaluates the cubic polynomial ``f(x, y, i)`` in the
+    normalised pixel coordinates ``(x, y)`` and the channel intensity ``i`` at
+    every pixel. Note the code applies it as a residual, ``i' = clamp(i + f)``,
+    whereas Eq. 6 writes ``i' = f``.
+
+    The parameter-prediction sub-network follows Sec. 3.2.1: conv/max-pool
+    stages, global average pooling (so it is resolution agnostic), dropout 0.5,
+    and a fully-connected regressor. The input is first resized to 300x300.
+    """
 
     def __init__(self, num_in_channels=64, num_out_channels=64, batch_size=1):
-        """Initialisation function
+        """Build the cubic-filter branch.
 
-        :param block: a block (layer) of the neural network
-        :param num_layers:  number of neural network layers
-        :returns: initialises parameters of the neural networ
+        :param num_in_channels: number of input feature-map channels
+        :param num_out_channels: number of channels used by the conv stack
+        :param batch_size: image batch size (only 1 is supported)
+        :returns: N/A
         :rtype: N/A
 
         """
@@ -54,11 +64,20 @@ class CubicFilter(nn.Module):
         :rtype: Tensor
 
         """
-        #######################################################
-        ####################### Cubic #########################
+        # Parameter prediction (Sec. 3.2.1): image + backbone features -> 60 coefficients
         feat_cubic = torch.cat((feat, img), 1)
         feat_cubic = self.upsample(feat_cubic)
+        return self.mask_from_input(feat_cubic, img)
 
+    def mask_from_input(self, feat_cubic, img):
+        """As :meth:`get_cubic_mask`, given the already resized 300x300 input.
+
+        :param feat_cubic: (B, 64, 300, 300) resized concatenation of features and image
+        :param img: image the filter is applied to, (B, 3, H, W)
+        :returns: cubic-filtered image, (B, 3, H, W)
+        :rtype: Tensor
+
+        """
         x = self.cubic_layer1(feat_cubic)
         x = self.cubic_layer2(x)
         x = self.cubic_layer3(x)
@@ -72,57 +91,35 @@ class CubicFilter(nn.Module):
 
         R = self.fc_cubic(x)
 
-        cubic_mask = torch.zeros_like(img)
+        # Normalised pixel coordinates in [0, 1): x_axis varies along dim 2 (H),
+        # y_axis along dim 3 (W). Shared by all three filter branches.
+        x_axis, x_axis2, x_axis3, y_axis, y_axis2, y_axis3 = _coord_grid_powers(
+            img.shape[2], img.shape[3], img.device)
 
-        x_axis = torch.arange(
-            img.shape[2], device=img.device).view(-1, 1).repeat(1, img.shape[3]) / img.shape[2]
-        y_axis = torch.arange(img.shape[3], device=img.device).repeat(
-            img.shape[2], 1) / img.shape[3]
-
-        '''
-        Cubic for R channel
-        '''
-        cubic_mask[0, 0, :, :] = R[0, 0] * (x_axis ** 3) + R[0, 1] * (x_axis ** 2) * y_axis + R[0, 2] * (
-            x_axis ** 2) * img[0, 0, :, :] + R[0, 3] * (x_axis ** 2) + R[0, 4] * x_axis * (y_axis ** 2) + R[
-            0, 5] * x_axis * y_axis * img[0, 0, :, :] \
-            + R[0, 6] * x_axis * y_axis + R[0, 7] * x_axis * (img[0, 0, :, :] ** 2) + R[
-            0, 8] * x_axis * img[0, 0, :, :] + R[0, 9] * x_axis + R[0, 10] * (
-            y_axis ** 3) + R[0, 11] * (y_axis ** 2) * img[0, 0, :, :] \
-            + R[0, 12] * (y_axis ** 2) + R[0, 13] * y_axis * (img[0, 0, :, :] ** 2) + R[
-            0, 14] * y_axis * img[0, 0, :, :] + R[0, 15] * y_axis + R[0, 16] * (
-            img[0, 0, :, :] ** 3) + R[0, 17] * (img[0, 0, :, :] ** 2) \
-            + R[0, 18] * \
-            img[0, 0, :, :] + R[0, 19]
-
-        '''
-        Cubic for G channel
-        '''
-        cubic_mask[0, 1, :, :] = R[0, 20] * (x_axis ** 3) + R[0, 21] * (x_axis ** 2) * y_axis + R[0, 22] * (
-            x_axis ** 2) * img[0, 1, :, :] + R[0, 23] * (x_axis ** 2) + R[0, 24] * x_axis * (y_axis ** 2) + R[
-            0, 25] * x_axis * y_axis * img[0, 1, :, :] \
-            + R[0, 26] * x_axis * y_axis + R[0, 27] * x_axis * (img[0, 1, :, :] ** 2) + R[
-            0, 28] * x_axis * img[0, 1, :, :] + R[0, 29] * x_axis + R[0, 30] * (
-            y_axis ** 3) + R[0, 31] * (y_axis ** 2) * img[0, 1, :, :] \
-            + R[0, 32] * (y_axis ** 2) + R[0, 33] * y_axis * (img[0, 1, :, :] ** 2) + R[
-            0, 34] * y_axis * img[0, 1, :, :] + R[0, 35] * y_axis + R[0, 36] * (
-            img[0, 1, :, :] ** 3) + R[0, 37] * (img[0, 1, :, :] ** 2) \
-            + R[0, 38] * \
-            img[0, 1, :, :] + R[0, 39]
-
-        '''
-        Cubic for B channel
-        '''
-        cubic_mask[0, 2, :, :] = R[0, 40] * (x_axis ** 3) + R[0, 41] * (x_axis ** 2) * y_axis + R[0, 42] * (
-            x_axis ** 2) * img[0, 2, :, :] + R[0, 43] * (x_axis ** 2) + R[0, 44] * x_axis * (y_axis ** 2) + R[
-            0, 45] * x_axis * y_axis * img[0, 2, :, :] \
-            + R[0, 46] * x_axis * y_axis + R[0, 47] * x_axis * (img[0, 2, :, :] ** 2) + R[
-            0, 48] * x_axis * img[0, 2, :, :] + R[0, 49] * x_axis + R[0, 50] * (
-            y_axis ** 3) + R[0, 51] * (y_axis ** 2) * img[0, 2, :, :] \
-            + R[0, 52] * (y_axis ** 2) + R[0, 53] * y_axis * (img[0, 2, :, :] ** 2) + R[
-            0, 54] * y_axis * img[0, 2, :, :] + R[0, 55] * y_axis + R[0, 56] * (
-            img[0, 2, :, :] ** 3) + R[0, 57] * (img[0, 2, :, :] ** 2) \
-            + R[0, 58] * \
-            img[0, 2, :, :] + R[0, 59]
+        # Evaluate Eq. 6 for every image in the batch and every RGB channel.
+        # R has shape (B, 60): 20 coefficients per channel, r[0..19] = A..T in
+        # the paper's order (x^3, x^2 y, x^2 i, x^2, x y^2, x y i, x y, x i^2,
+        # x i, x, y^3, y^2 i, y^2, y i^2, y i, y, i^3, i^2, i, 1).
+        # The x/y coordinate grids are shared across the batch and channels;
+        # the coefficients are reshaped to (B, 3, 1, 1) so one expression
+        # evaluates all three channels (this used to loop over c, with the
+        # same per-element arithmetic).
+        R = R.view(-1, 3, 20)
+        r = [R[:, :, k].reshape(-1, 3, 1, 1) for k in range(20)]
+        img_c = img  # (B, 3, H, W)
+        cubic_mask = r[0] * x_axis3 + r[1] * x_axis2 * y_axis + r[2] * (
+            x_axis2) * img_c + r[3] * x_axis2 + r[4] * x_axis * y_axis2 + r[
+            5] * x_axis * y_axis * img_c \
+            + r[6] * x_axis * y_axis + r[7] * x_axis * (img_c ** 2) + r[
+            8] * x_axis * img_c + r[9] * x_axis + r[10] * (
+            y_axis3) + r[11] * y_axis2 * img_c \
+            + r[12] * y_axis2 + r[13] * y_axis * (img_c ** 2) + r[
+            14] * y_axis * img_c + r[15] * y_axis + r[16] * (
+            img_c ** 3) + r[17] * (img_c ** 2) \
+            + r[18] * \
+            img_c + r[19]
 
         img_cubic = torch.clamp(img + cubic_mask, 0, 1)
         return img_cubic
+
+

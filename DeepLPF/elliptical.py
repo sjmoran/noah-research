@@ -4,31 +4,38 @@
 #This program is free software; you can redistribute it and/or modify it under the terms of the BSD 0-Clause License.
 
 #This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD 0-Clause License for more details.
-'''
-This is a PyTorch implementation of the CVPR 2020 paper:
-"Deep Local Parametric Filters for Image Enhancement": https://arxiv.org/abs/2003.13985
+"""The elliptical filter of Sec. 3.2.3, Eq. 4.
 
-Please cite the paper if you use this code
-
-The elliptical filter of Sec. 3.2.3, Eq. 4.
-'''
+It predicts ellipses - centre, semi-axes and rotation - and scales the image
+within each one, giving the radial and vignette-style adjustments.
+"""
 import math
 
 import torch
 import torch.nn as nn
-from torch.autograd import Variable
 
 from blocks import ConvBlock, GlobalPoolingBlock, MaxPoolBlock
+from filtercommon import _coord_grids
 
 
 class EllipticalFilter(nn.Module):
+    """Elliptical-filter branch of DeepLPF (paper Sec. 3.2.3, Eq. 4; Sec. 3.3, Eq. 7).
+
+    Regresses ``E = 24`` values: for each of three ellipse instances the centre
+    ``(h, k)``, semi-axes ``(a, b)``, rotation ``theta`` and three per-channel
+    scaling factors ``s_e^R, s_e^G, s_e^B``. Inside an ellipse the scaling is
+    ``s_e`` at the centre and decays linearly to 1 at the boundary (the code's
+    linear-in-radius form of Eq. 4); outside it is 1 (no change). Each instance
+    yields a (B, 3, H, W) map; the three are fused by element-wise
+    multiplication (Eq. 7) into ``s_e``. Scalings are bounded to [0, max_scale = 2].
+    """
 
     def __init__(self, num_in_channels=64, num_out_channels=64):
-        """Initialisation function
+        """Build the elliptical-filter branch.
 
-        :param block: a block (layer) of the neural network
-        :param num_layers:  number of neural network layers
-        :returns: initialises parameters of the neural networ
+        :param num_in_channels: number of input feature-map channels
+        :param num_out_channels: number of channels used by the conv stack
+        :returns: N/A
         :rtype: N/A
 
         """
@@ -43,7 +50,7 @@ class EllipticalFilter(nn.Module):
         self.elliptical_layer7 = ConvBlock(num_out_channels, num_out_channels)
         self.elliptical_layer8 = GlobalPoolingBlock(2)
         self.fc_elliptical = torch.nn.Linear(
-            num_out_channels, 24)  # elliptical
+            num_out_channels, 24)
         self.upsample = torch.nn.Upsample(size=(300, 300), mode='bilinear',align_corners=False)
         self.dropout = nn.Dropout(0.5)
 
@@ -76,19 +83,34 @@ class EllipticalFilter(nn.Module):
         """Gets the elliptical scaling mask according to the equation of a
         rotated ellipse
 
+        :param x_axis: normalised x-coordinate grid
+        :param y_axis: normalised y-coordinate grid
+        :param shift_x: ellipse centre x-coordinate
+        :param shift_y: ellipse centre y-coordinate
+        :param semi_axis_x: ellipse semi-axis along x
+        :param semi_axis_y: ellipse semi-axis along y
+        :param alpha: rotation angle of the ellipse
+        :param scale_factor: peak scaling applied at the ellipse centre
+        :param max_scale: maximum permitted scaling factor
+        :param eps: small constant to avoid division by zero
+        :param radius: ellipse radius at the current angle
         :returns: scaling mask
         :rtype: Tensor
 
         """
-        # Check whether a point is inside our outside of the ellipse and set the scaling factor accordingly
+        # Rotated-ellipse membership test (the bracketed term of Eq. 4):
+        # [(x-h)cos t + (y-k)sin t]^2 / a^2 + [(x-h)sin t - (y-k)cos t]^2 / b^2 < 1
         ellipse_equation_part1 = (((x_axis - shift_x)*torch.cos(alpha) + (y_axis - shift_y)*torch.sin(alpha)) ** 2) / ((semi_axis_x)**2)
         ellipse_equation_part2 = (((x_axis - shift_x)*torch.sin(alpha) - (y_axis - shift_y)*torch.cos(alpha)) ** 2) / ((semi_axis_y)**2)
 
-        # Set the scaling factors to decay with radius inside the ellipse
+        # Inside: scale_factor at the centre, decaying linearly with the distance
+        # from the centre to reach 1 at the ellipse boundary (`radius` is the
+        # boundary distance along the pixel's direction). Outside: 1 (no change).
         mask_scale = self.where(ellipse_equation_part1+ellipse_equation_part2 < 1,
                                 (torch.sqrt((x_axis - shift_x) ** 2 + (y_axis - shift_y) ** 2 + eps) * (1 - scale_factor)) / radius + scale_factor, 1)
 
-        mask_scale = torch.clamp(mask_scale.unsqueeze(0), 0, max_scale)
+        # Returns a (B, H, W) per-image, per-ellipse scaling map.
+        mask_scale = torch.clamp(mask_scale, 0, max_scale)
 
         return mask_scale
 
@@ -109,12 +131,28 @@ class EllipticalFilter(nn.Module):
 
         # max_scale is the maximum an ellipse can scale the image R,G,B values by
         max_scale = 2
-        min_scale = 0
 
         feat_elliptical = torch.cat((feat, img), 1)
         feat_elliptical = self.upsample(feat_elliptical)
+        return self.mask_from_input(feat_elliptical, img)
 
-        # The following layers calculate the parameters of the ellipses that we use for image enhancement
+    def mask_from_input(self, feat_elliptical, img):
+        """As :meth:`get_elliptical_mask`, given the already resized 300x300 input.
+
+        :param feat_elliptical: (B, 64, 300, 300) resized concatenation of features and image
+        :param img: image the filter is applied to, (B, 3, H, W)
+        :returns: elliptical adjustment maps for each channel, (B, 3, H, W)
+        :rtype: Tensor
+
+        """
+        # The two eps parameters are used to avoid numerical issues in the learning
+        eps2 = 1e-7
+        eps1 = 1e-10
+
+        # max_scale is the maximum an ellipse can scale the image R,G,B values by
+        max_scale = 2
+
+        # Parameter prediction (Sec. 3.2.1): image + backbone features -> 24 values
         x = self.elliptical_layer1(feat_elliptical)
         x = self.elliptical_layer2(x)
         x = self.elliptical_layer3(x)
@@ -131,131 +169,63 @@ class EllipticalFilter(nn.Module):
         # https://math.stackexchange.com/questions/426150/what-is-the-general-equation-of-the-ellipse-that-is-not-in-the-origin-and-rotate
         
         # Normalised coordinates for x and y-axes, we instantiate the ellipses in these coordinates
-        x_axis = torch.arange(
-            img.shape[2], device=img.device).view(-1, 1).repeat(1, img.shape[3]) / img.shape[2]
-        y_axis = torch.arange(img.shape[3], device=img.device).repeat(
-            img.shape[2], 1) / img.shape[3]
+        x_axis, y_axis = _coord_grids(img.shape[2], img.shape[3], img.device)
 
-        # x coordinate - h position
-        right_x = (img.shape[2] - 1) / img.shape[2]
-        left_x = 0
+        # G has shape (B, 24). The three ellipse instances are evaluated
+        # together along a leading "instance" dim: each per-instance parameter
+        # is a (B, 3) vector reshaped to (B, 3, 1, 1, 1) so it broadcasts over
+        # the (H, W) coordinate grids, and the nine (instance, channel) masks
+        # come out of one get_mask call as (B, 3, 3, H, W). This replaced three
+        # copies of every line and nine get_mask calls; the per-element
+        # arithmetic is unchanged.
+        # Layout: [0:3] h, [3:6] k, [6:9] a, [9:12] b, [12:15] theta,
+        # [15:24] per-channel scale factors s_e (three instances x R,G,B).
+        # Centre of ellipse, x-coordinate (h in Eq. 4)
+        x_coord = (self.tanh01(G[:, 0:3]) + eps1).view(-1, 3, 1, 1, 1)
 
-        # Centre of ellipse, x-coordinate
-        x_coord1 = self.tanh01(G[0, 0]) + eps1
-        x_coord2 = self.tanh01(G[0, 1]) + eps1
-        x_coord3 = self.tanh01(G[0, 2]) + eps1
+        # Centre of ellipse, y-coordinate (k in Eq. 4)
+        y_coord = (self.tanh01(G[:, 3:6]) + eps1).view(-1, 3, 1, 1, 1)
 
-        # y coordinate - k coordinate
-        right_y = (img.shape[3] - 1) // img.shape[3]
-        left_y = 0
+        # Semi-major axis a
+        a = (self.tanh01(G[:, 6:9]) + eps1).view(-1, 3, 1, 1, 1)
 
-        # Centre of ellipse, y-coordinate
-        y_coord1 = self.tanh01(G[0, 3]) + eps1 
-        y_coord2 = self.tanh01(G[0, 4]) + eps1
-        y_coord3 = self.tanh01(G[0, 5]) + eps1
+        # Semi-minor axis b
+        b = (self.tanh01(G[:, 9:12]) + eps1).view(-1, 3, 1, 1, 1)
 
-        # a value of ellipse
-        a1 = self.tanh01(G[0, 6]) + eps1
-        a2 = self.tanh01(G[0, 7]) + eps1
-        a3 = self.tanh01(G[0, 8]) + eps1
+        # Rotation angle theta in [0, pi]
+        A = (self.tanh01(G[:, 12:15]) * math.pi + eps1).view(-1, 3, 1, 1, 1)
 
-        # b value
-        b1 = self.tanh01(G[0, 9]) + eps1
-        b2 = self.tanh01(G[0, 10]) + eps1
-        b3 = self.tanh01(G[0, 11]) + eps1
+        # Per-channel scale factors s_e in [0, max_scale] for the three
+        # instances: (B, instance, channel, 1, 1)
+        scale = (self.tanh01(G[:, 15:24]) * max_scale + eps1).view(-1, 3, 3, 1, 1)
 
-        # A value is angle to the x-axis
-        A1 = self.tanh01(G[0, 12]) * math.pi + eps1
-        A2 = self.tanh01(G[0, 13]) * math.pi + eps1
-        A3 = self.tanh01(G[0, 14]) * math.pi + eps1
+        # Polar angle of every pixel about the ellipse centre, measured from the
+        # y semi-axis and offset by the ellipse rotation. The clamp keeps acos
+        # inside its domain so its gradient stays finite. (B, 3, 1, H, W)
+        angle = torch.acos(torch.clamp((y_axis-y_coord) /
+            (torch.sqrt((x_axis-x_coord)**2 + (y_axis-y_coord)**2 + eps1)), -1+eps2, 1-eps2))-A
 
-        '''
-        The following are the scale factors for each of the 9 ellipses
-        '''
-        scale1 = self.tanh01(G[0, 15]) * max_scale + eps1 
-        scale2 = self.tanh01(G[0, 16]) * max_scale + eps1
-        scale3 = self.tanh01(G[0, 17]) * max_scale + eps1
-
-        scale4  = self.tanh01(G[0, 18]) * max_scale + eps1
-        scale5 = self.tanh01(G[0, 19]) * max_scale + eps1
-        scale6 = self.tanh01(G[0, 20]) * max_scale + eps1
-
-        scale7 = self.tanh01(G[0, 21]) * max_scale + eps1
-        scale8 = self.tanh01(G[0, 22]) * max_scale + eps1
-        scale9 = self.tanh01(G[0, 23]) * max_scale + eps1
-
-        ############ Angle of orientation of the ellipses with respect to the y semi-axis
-        angle_1 = torch.acos(torch.clamp((y_axis-y_coord1) / 
-            (torch.sqrt((x_axis-x_coord1)**2 + (y_axis-y_coord1)**2 + eps1)), -1+eps2, 1-eps2))-A1
-
-        angle_2 = torch.acos(torch.clamp((y_axis-y_coord2) / 
-            (torch.sqrt((x_axis-x_coord2) ** 2 + (y_axis-y_coord2)**2 + eps1)), -1+eps2, 1-eps2))-A2
-        
-        angle_3 = torch.acos(torch.clamp((y_axis-y_coord3) / 
-            (torch.sqrt((x_axis-x_coord3) ** 2 + (y_axis-y_coord3)**2 + eps1)), -1+eps2, 1-eps2))-A3
-
-        ############ Radius of the ellipses
+        # Distance from the centre to the ellipse boundary along each pixel's angle,
+        # r(phi) = a b / sqrt(a^2 sin^2 phi + b^2 cos^2 phi); this is the normaliser
+        # for the linear decay in get_mask.
         # https://math.stackexchange.com/questions/432902/how-to-get-the-radius-of-an-ellipse-at-a-specific-angle-by-knowing-its-semi-majo
-        radius_1 = (a1*b1)/torch.sqrt((a1**2)*(torch.sin(angle_1)**2)+(b1**2)*(torch.cos(angle_1)**2) + eps1)
+        radius = (a*b)/torch.sqrt((a**2)*(torch.sin(angle)**2)+(b**2)*(torch.cos(angle)**2) + eps1)
 
-        radius_2 = (a2*b2)/torch.sqrt((a2**2)*(torch.sin(angle_2)**2)+(b2**2)*(torch.cos(angle_2)**2) + eps1)
+        # Every instance's three channels share one ellipse.
+        semi_axis_y = b
 
-        radius_3 = (a3*b3)/torch.sqrt((a3**2)*(torch.sin(angle_3)**2)+(b3**2)*(torch.cos(angle_3)**2) + eps1)
+        # Every instance: one ellipse geometry, three per-channel (R, G, B)
+        # scalings -> (B, instance, channel, H, W)
+        mask_scale = self.get_mask(x_axis, y_axis,
+                                   shift_x=x_coord, shift_y=y_coord, semi_axis_x=a, semi_axis_y=semi_axis_y,
+                                   alpha=angle, scale_factor=scale, radius=radius)
+        mask_scale_rad = torch.clamp(mask_scale, 0, max_scale)
 
-        
-        ############ Scaling factors for the R,G,B channels, here we learn three ellipses
-        mask_scale1 = self.get_mask(x_axis, y_axis,
-                                    shift_x=x_coord1, shift_y=y_coord1, semi_axis_x=a1, semi_axis_y=b1, alpha=angle_1, scale_factor=scale1,
-                                    radius=radius_1)
-
-        mask_scale2 = self.get_mask(x_axis, y_axis,
-                                    shift_x=x_coord1, shift_y=y_coord1, semi_axis_x=a1, semi_axis_y=b1, alpha=angle_1, scale_factor=scale2,
-                                    radius=radius_1)
-
-        mask_scale3 = self.get_mask(x_axis, y_axis,
-                                    shift_x=x_coord1, shift_y=y_coord1, semi_axis_x=a1, semi_axis_y=b1, alpha=angle_1, scale_factor=scale3,
-                                    radius=radius_1)
-
-        mask_scale_1 = torch.cat(
-            (mask_scale1, mask_scale2, mask_scale3), dim=0)
-        mask_scale_1_rad = torch.clamp(mask_scale_1.unsqueeze(0), 0, max_scale)
-
-        ############ Scaling factors for the R,G,B channels, here we learn three ellipses
-        mask_scale4 = self.get_mask(x_axis, y_axis,
-                                    shift_x=x_coord2, shift_y=y_coord2, semi_axis_x=a2, semi_axis_y=b2, alpha=angle_2, scale_factor=scale4,
-                                    radius=radius_2)
-
-        mask_scale5 = self.get_mask(x_axis, y_axis,
-                                    shift_x=x_coord2, shift_y=y_coord2, semi_axis_x=a2, semi_axis_y=b2, alpha=angle_2, scale_factor=scale5,
-                                    radius=radius_2)
-
-        mask_scale6 = self.get_mask(x_axis, y_axis,
-                                    shift_x=x_coord2, shift_y=y_coord2, semi_axis_x=a2, semi_axis_y=b2, alpha=angle_2, scale_factor=scale6,
-                                    radius=radius_2)
-
-        mask_scale_4 = torch.cat(
-            (mask_scale4, mask_scale5, mask_scale6), dim=0)
-        mask_scale_4_rad = torch.clamp(mask_scale_4.unsqueeze(0), 0, max_scale)
-
-        ############ Scaling factors for the R,G,B channels, here we learn three ellipses
-        mask_scale7 = self.get_mask(x_axis, y_axis,
-                                    shift_x=x_coord3, shift_y=y_coord3, semi_axis_x=a3, semi_axis_y=b3, alpha=angle_3, scale_factor=scale7,
-                                    radius=radius_3)
-
-        mask_scale8 = self.get_mask(x_axis, y_axis,
-                                    shift_x=x_coord3, shift_y=y_coord3, semi_axis_x=a3, semi_axis_y=b3, alpha=angle_3, scale_factor=scale8,
-                                    radius=radius_3)
-
-        mask_scale9 = self.get_mask(x_axis, y_axis,
-                                    shift_x=x_coord3, shift_y=y_coord3, semi_axis_x=a3, semi_axis_y=b3, alpha=angle_3, scale_factor=scale9,
-                                    radius=radius_3)
-
-        mask_scale_7 = torch.cat(
-            (mask_scale7, mask_scale8, mask_scale9), dim=0)
-        mask_scale_7_rad = torch.clamp(mask_scale_7.unsqueeze(0), 0, max_scale)
-
-        ############ Mix the ellipses together by multiplication
+        # Fuse the three instances by element-wise multiplication: s_e = prod_i s_ei (Eq. 7)
         mask_scale_elliptical = torch.clamp(
-            mask_scale_1_rad * mask_scale_4_rad * mask_scale_7_rad, 0, max_scale)
+            mask_scale_rad[:, 0] * mask_scale_rad[:, 1] * mask_scale_rad[:, 2], 0, max_scale)
 
         return mask_scale_elliptical
+
+
+

@@ -74,21 +74,29 @@ class DeepLPFParameterPrediction(nn.Module):
         """
         x = x.contiguous()  # remove memory holes
 
-        feat = x[:, 3:64, :, :]
-        img = x[:, 0:3, :, :]
+        feat = x[:, 3:64, :, :]  # C' = C - 3 backbone features
+        img = x[:, 0:3, :, :]    # Y1: backbone-enhanced image
 
-        img_cubic = self.cubic_filter.get_cubic_mask(feat, img)
-       
-        mask_scale_graduated = self.graduated_filter.get_graduated_mask(
-            feat, img_cubic)
-        mask_scale_elliptical = self.elliptical_filter.get_elliptical_mask(
-            feat, img_cubic)
-       
-        # Fusion of the two scaling maps (Sec. 3.1). Both maps are neutral at
-        # 1, not at 0, so adding them directly makes two neutral branches
-        # compose to 2 and doubles the image before the clamp. Adding the
-        # deviations from neutral keeps the neutral element neutral:
-        # S = 1 + (s_g - 1) + (s_e - 1).
+        # Each branch's parameter predictor consumes cat(feat, image) resized
+        # to 300x300. The resize is bilinear and per channel, so
+        # upsample(cat(a, b)) == cat(upsample(a), upsample(b)) exactly; the
+        # feature part is shared by all three branches, and the graduated and
+        # elliptical branches share the whole input. Resize each part once
+        # instead of five times.
+        upsample = self.cubic_filter.upsample
+        feat_up = upsample(feat)
+
+        # Single-stream path: Y2 = polynomial filter applied to Y1
+        img_cubic = self.cubic_filter.mask_from_input(
+            torch.cat((feat_up, upsample(img)), 1), img)
+
+        # Two-stream path: graduated and elliptical scaling maps estimated from Y2
+        feat_img_cubic_up = torch.cat((feat_up, upsample(img_cubic)), 1)
+        mask_scale_graduated = self.graduated_filter.mask_from_input(
+            feat_img_cubic_up, img_cubic)
+        mask_scale_elliptical = self.elliptical_filter.mask_from_input(
+            feat_img_cubic_up, img_cubic)
+
         mask_scale_fuse = torch.clamp(
             1.0 + (mask_scale_graduated - 1.0) + (mask_scale_elliptical - 1.0), 0, 2)
 

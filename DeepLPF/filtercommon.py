@@ -4,32 +4,65 @@
 #This program is free software; you can redistribute it and/or modify it under the terms of the BSD 0-Clause License.
 
 #This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD 0-Clause License for more details.
-'''
-This is a PyTorch implementation of the CVPR 2020 paper:
-"Deep Local Parametric Filters for Image Enhancement": https://arxiv.org/abs/2003.13985
+"""Pieces the three filter heads share: the coordinate grids and the STE.
 
-Please cite the paper if you use this code
-
-Pieces shared by the three filter heads: the straight-through binarisation
-of Sec. 3.2.2.
-'''
+The grids are cached because every head builds the same ones for a given image
+size. ``BinaryLayer`` is the straight-through binarisation of Sec. 3.2.2, used
+by the graduated filter.
+"""
 import torch
 import torch.nn as nn
 
 
+#: Coordinate grids keyed by (H, W, device); every filter head builds the same
+#: ones for a given image size, so they are built once and reused.
+_GRID_CACHE = {}
+
+
+def _coord_grids(H, W, device):
+    """Normalised pixel-coordinate grids shared by the three filter branches.
+
+    ``x_axis`` varies along dim 2 (H), ``y_axis`` along dim 3 (W), both in
+    [0, 1). Built exactly as the branches used to build them inline, but
+    cached per (H, W, device): FiveK has 16 distinct image sizes, and building
+    them per call cost six host-to-device copies per forward pass.
+    """
+    key = (H, W, device)
+    grids = _GRID_CACHE.get(key)
+    if grids is None:
+        x_axis = torch.arange(H).view(-1, 1).repeat(1, W).to(device) / H
+        y_axis = torch.arange(W).repeat(H, 1).to(device) / W
+        grids = _GRID_CACHE[key] = (x_axis, y_axis)
+    return grids
+
+
+def _coord_grid_powers(H, W, device):
+    """``(x, x^2, x^3, y, y^2, y^3)`` of the grids from :func:`_coord_grids`.
+
+    The cubic filter's polynomial needs the squares and cubes of the
+    coordinate grids; they depend only on the image size, so compute them
+    once per size rather than on every forward pass.
+    """
+    key = ('pow', H, W, device)
+    powers = _GRID_CACHE.get(key)
+    if powers is None:
+        x_axis, y_axis = _coord_grids(H, W, device)
+        powers = _GRID_CACHE[key] = (
+            x_axis, x_axis ** 2, x_axis ** 3, y_axis, y_axis ** 2, y_axis ** 3)
+    return powers
+
+
 class SignSTE(torch.autograd.Function):
-    """sign() with a straight-through gradient (Courbariaux et al.)
+    """``sign`` with a straight-through gradient.
 
-    The forward pass binarises; the backward pass passes the gradient through
-    unchanged except where the input has saturated (|input| > 1), where it is
-    zeroed.
+    ``torch.sign`` has zero gradient everywhere, so a binarisation layer built
+    on it alone blocks learning. This is the estimator of Courbariaux et al.:
+    the forward pass binarises, and the backward pass passes the gradient
+    through unchanged except where the input has saturated (``|input| > 1``),
+    where it is zeroed.
 
-    This is implemented as a torch.autograd.Function because that is the only
-    place autograd calls a user-defined backward. A backward() defined as a
-    plain method on an nn.Module is never called by autograd, so the gradient
-    seen by the layer's input would be torch.sign's own gradient, which is zero
-    everywhere.
-
+    Implemented as an ``autograd.Function`` because that is the only thing
+    PyTorch calls ``backward`` on -- see :class:`BinaryLayer`.
     """
 
     @staticmethod
@@ -44,9 +77,18 @@ class SignSTE(torch.autograd.Function):
 
 
 class BinaryLayer(nn.Module):
+    """Binarisation layer with a straight-through estimator.
+
+    Used by the graduated filter for the binarised inversion indicator
+    ``g_inv_hat = (sgn(g_inv) + 1) / 2`` of paper Sec. 3.2.2.
+
+    The estimator lives in :class:`SignSTE`, a ``torch.autograd.Function``:
+    ``torch.sign`` has zero gradient everywhere, so the binarisation has to pass
+    the gradient through itself for the inversion indicators to train at all.
+    """
 
     def forward(self, input):
-        """Forward function for binary layer
+        """Binarise the input with a straight-through gradient.
 
         :param input: data
         :returns: sign of data

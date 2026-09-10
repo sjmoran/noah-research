@@ -4,23 +4,31 @@
 #This program is free software; you can redistribute it and/or modify it under the terms of the BSD 0-Clause License.
 
 #This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD 0-Clause License for more details.
-'''
-This is a PyTorch implementation of the CVPR 2020 paper:
-"Deep Local Parametric Filters for Image Enhancement": https://arxiv.org/abs/2003.13985
+"""The graduated filter of Sec. 3.2.2, Eqs. 1-3.
 
-Please cite the paper if you use this code
-
-The graduated filter of Sec. 3.2.2, Eqs. 1-3.
-'''
+It predicts pairs of parallel lines and scales the image between them, with the
+inversion indicator binarised through the straight-through estimator.
+"""
 import torch
 import torch.nn as nn
-from torch.autograd import Variable
 
 from blocks import ConvBlock, GlobalPoolingBlock, MaxPoolBlock
-from filtercommon import BinaryLayer
+from filtercommon import BinaryLayer, _coord_grids
 
 
 class GraduatedFilter(nn.Module):
+    """Graduated-filter branch of DeepLPF (paper Sec. 3.2.2, Eqs. 1-3; Sec. 3.3, Eq. 7).
+
+    Emulates a photographic graduated filter: three parallel lines split the
+    image into a 100% region, two linear-decay bands and a 0% region. The
+    network regresses ``G = 24`` values: for each of three filter instances a
+    binarised inversion indicator ``g_inv`` (via :class:`BinaryLayer`), the
+    central-line slope ``m``, two offsets ``o1, o2`` (so ``d1 = o1 cos(alpha)``,
+    ``d2 = o2 cos(alpha)``, ``alpha = atan(m)``), and three per-channel scaling
+    factors ``s_g^R, s_g^G, s_g^B``. Each instance yields a (B, 3, H, W)
+    scaling map; the three instances are fused by element-wise multiplication
+    (Eq. 7) into ``s_g``. Scalings are bounded to [0, max_scale = 2].
+    """
 
     def __init__(self, num_in_channels=64, num_out_channels=64):
         """Initialisation function for the graduated filter
@@ -58,67 +66,81 @@ class GraduatedFilter(nn.Module):
         tanh = nn.Tanh()
         return 0.5 * (tanh(x) + 1)
 
-    def where(self, cond, x_1, x_2):
-        """Differentiable where function to compare two Tensors
-
-        :param cond: condition e.g. <
-        :param x_1: Tensor 1
-        :param x_2: Tensor 2
-        :returns: Boolean comparison result
-        :rtype: Tensor
-
-        """
-        cond = cond.float()
-        return (cond * x_1) + ((1 - cond) * x_2)
-
     def get_inverted_mask(self, factor, invert, d1, d2, max_scale, top_line):
-        """ Inverts the graduated filter based on a learnt binary variable 
+        """Builds one channel's graduated scaling map ``s(x, y)`` (paper Eqs. 1-3).
 
-        :param factor: scale factor
-        :param invert: binary indicator variable
+        ``top_line`` plays the role of the signed distance ``l(x, y)`` to the
+        central line; the two ramps ``(... / d1) * top_line`` and
+        ``(... / d2) * top_line`` are the linear decays of Eqs. 1 and 2, and
+        ``invert`` is the binarised ``g_inv`` of Eq. 3 that swaps which side of
+        the line receives the full scaling. The four cases (inverted or not,
+        scale factor above or below 1) are the branches of Eq. 3 written out
+        so that the scaling always ramps between 1 (no change) and ``factor``.
+
+        All arguments broadcast against each other; the per-image scalars are
+        passed with trailing singleton dims so they broadcast over the (H, W)
+        grid. The caller evaluates all nine (instance, channel) masks in one
+        call with ``factor`` of shape (B, 3, 3, 1, 1), the per-instance
+        ``invert``, ``d1``, ``d2`` of shape (B, 3, 1, 1, 1) and ``top_line`` of
+        shape (B, 3, 1, H, W); the arithmetic per element is exactly what a
+        single (B, H, W) call performed.
+
+        :param factor: scale factor s_g
+        :param invert: binary indicator variable g_inv in {0, 1}
         :param d1: distance between top and mid line
-        :param d2: distannce between botto and mid line
+        :param d2: distance between bottom and mid line
         :param max_scale: maximum scaling factor possible
-        :param top_line:  representation of top line
-        :returns: inverted scaling mask
+        :param top_line: soft above/below-line map
+        :returns: scaling mask, the broadcast shape of the inputs
         :rtype: Tensor
 
         """
-        # `invert` is the binarised g_inv of Eq. 3. Selecting the branch with a
-        # Python `if` (or, equivalently, with torch.where, whose condition is
-        # not differentiable) means g_inv never enters the arithmetic, so no
-        # gradient reaches it and the indicator cannot be learned. Evaluate
-        # both branches and blend them by the indicator instead: `invert` is
-        # exactly 0 or 1, so the forward value is the same branch as before,
-        # but the straight-through gradient of BinaryLayer now flows to g_inv.
-        if (factor >= 1).all():
-            diff = ((factor-1))/2 + 1
-            # invert == 1
-            grad1_inv = (diff-factor)/d1
-            grad2_inv = (1-diff)/d2
-            mask_inv = factor+grad1_inv*top_line+grad2_inv*top_line
-            # invert != 1
-            grad1_non = (diff-factor)/d1
-            grad2_non = (factor-diff)/d2
-            mask_non = 1+grad1_non*top_line+grad2_non*top_line
-            min_val, max_val = 1, max_scale
-        else:
-            diff = ((1-factor))/2 + factor
-            # invert == 1
-            grad1_inv = (diff-factor)/d1
-            grad2_inv = (1-diff)/d2
-            mask_inv = factor+grad1_inv*top_line+grad2_inv*top_line
-            # invert != 1
-            grad1_non = (diff-1)/d1
-            grad2_non = (factor-diff)/d2
-            mask_non = 1+grad1_non*top_line+grad2_non*top_line
-            min_val, max_val = 0, 1
+        # The original code branched with `(invert == 1).all()` / `(factor >= 1).all()`,
+        # which collapses the batch to a single decision. To support a batch whose
+        # images take different branches, all four branch expressions are evaluated
+        # and selected per image with torch.where; the clamp bounds (which depend
+        # only on factor >= 1) are likewise applied element-wise.
+        f = factor
+        inv = (invert == 1)
+        fac_ge1 = (factor >= 1)
 
-        weight = invert.to(mask_inv.dtype)
-        mask_scale = weight*mask_inv + (1-weight)*mask_non
-        mask_scale = torch.clamp(mask_scale, min=min_val, max=max_val)
+        # Every branch has the form  base + (A / d1) * top_line + (B / d2) * top_line
+        # with per-image scalars base, A, B; only those differ between the
+        # branches. Select them per image first, then evaluate the ramp once
+        # at full resolution instead of four times. The selected map is
+        # arithmetically identical to the branch it came from.
+        diff_hi = (f - 1) / 2 + 1
+        diff_lo = (1 - f) / 2 + f
+        # invert == 1
+        A_inv = torch.where(fac_ge1, diff_hi - f, diff_lo - f)
+        B_inv = torch.where(fac_ge1, 1 - diff_hi, 1 - diff_lo)
+        # invert != 1
+        A_non = torch.where(fac_ge1, diff_hi - f, diff_lo - 1)
+        B_non = torch.where(fac_ge1, f - diff_hi, f - diff_lo)
 
-        mask_scale = torch.clamp(mask_scale.unsqueeze(0), 0, max_scale)
+        def ramp(base, A, B):
+            return base + (A / d1) * top_line + (B / d2) * top_line
+
+        branch_inv = ramp(f, A_inv, B_inv)
+        branch_non = ramp(1, A_non, B_non)
+
+        # Selecting the branch on `inv` -- with a Python `if` or with a
+        # torch.where CONDITION, neither of which is differentiable -- severs
+        # g_inv from the loss, so the inversion indicators receive no gradient
+        # even with a working straight-through estimator.
+        #
+        # Blend the two branches by the binarised indicator instead. The
+        # forward value is unchanged, because `invert` is exactly 0 or 1, but
+        # now the STE's gradient reaches g_inv.
+        w = invert.to(branch_inv.dtype)
+        mask_scale = w * branch_inv + (1.0 - w) * branch_non
+
+        # factor >= 1 branches clamp to [1, max_scale]; factor < 1 branches to [0, 1].
+        lower = torch.where(fac_ge1, torch.ones_like(f), torch.zeros_like(f))
+        upper = torch.where(fac_ge1, torch.full_like(f, float(max_scale)), torch.ones_like(f))
+        mask_scale = torch.minimum(torch.maximum(mask_scale, lower), upper)
+
+        mask_scale = torch.clamp(mask_scale, 0, max_scale)
         return mask_scale
 
     def get_graduated_mask(self, feat, img):
@@ -130,19 +152,25 @@ class GraduatedFilter(nn.Module):
         :rtype: Tensor
 
         """
-        #######################################################
-        ####################### Graduated #####################
-        eps = 1e-10
-
-        x_axis = torch.arange(
-            img.shape[2], device=img.device).view(-1, 1).repeat(1, img.shape[3]) / img.shape[2]
-        y_axis = torch.arange(img.shape[3], device=img.device).repeat(
-            img.shape[2], 1) / img.shape[3]
-
         feat_graduated = torch.cat((feat, img), 1)
         feat_graduated = self.upsample(feat_graduated)
+        return self.mask_from_input(feat_graduated, img)
 
-        # The following layers calculate the parameters of the graduated filters that we use for image enhancement
+    def mask_from_input(self, feat_graduated, img):
+        """As :meth:`get_graduated_mask`, given the already resized 300x300 input.
+
+        :param feat_graduated: (B, 64, 300, 300) resized concatenation of features and image
+        :param img: image the filter is applied to, (B, 3, H, W)
+        :returns: scaling map, (B, 3, H, W)
+        :rtype: Tensor
+
+        """
+        eps = 1e-10
+
+        # Normalised pixel coordinates (see CubicFilter.get_cubic_mask)
+        x_axis, y_axis = _coord_grids(img.shape[2], img.shape[3], img.device)
+
+        # Parameter prediction (Sec. 3.2.1): image + backbone features -> 24 values
         x = self.graduated_layer1(feat_graduated)
         x = self.graduated_layer2(x)
         x = self.graduated_layer3(x)
@@ -155,96 +183,61 @@ class GraduatedFilter(nn.Module):
         x = self.dropout(x)
         G = self.fc_graduated(x)
 
-        # Classification values (above or below the line)
-        above_or_below_line1 = ((self.bin_layer(G[0, 0]))+1)/2
-        above_or_below_line2 = ((self.bin_layer(G[0, 1]))+1)/2
-        above_or_below_line3 = ((self.bin_layer(G[0, 2]))+1)/2
+        # G has shape (B, 24); every parameter below is a per-image vector of
+        # shape (B,). Layout: [0:3] g_inv, [3:6] slope m, [6:9] and [9:12] the
+        # central-line intercept c (which doubles as offset o1; [9:12] is
+        # lower-bounded by [6:9]), [12:15] offset o2 (upper-bounded by o1),
+        # [15:24] per-channel scale factors s_g (three instances x R,G,B).
+        #
+        # The three instances are evaluated together along a leading "instance"
+        # dim: every per-instance quantity below has shape (B, 3), and the nine
+        # (instance, channel) masks come out of one get_inverted_mask call as
+        # (B, 3, 3, H, W). This replaced three copies of every line and nine
+        # mask calls; the per-element arithmetic is unchanged.
+        #
+        # Inversion indicator g_inv_hat = (sgn(g_inv) + 1) / 2 in {0, 1} (Sec. 3.2.2)
+        above_or_below_line = ((self.bin_layer(G[:, 0:3]))+1)/2
 
-        slope1 = G[0, 3].clone()
-        slope2 = G[0, 4].clone()
-        slope3 = G[0, 5].clone()
+        slope = G[:, 3:6].clone()
 
-        y_axis_dist1 = self.tanh01(G[0, 6]) + eps
-        y_axis_dist2 = self.tanh01(G[0, 7]) + eps
-        y_axis_dist3 = self.tanh01(G[0, 8]) + eps
+        y_axis_dist = self.tanh01(G[:, 6:9]) + eps
 
-        y_axis_dist1 = torch.clamp(self.tanh01(G[0, 9]), y_axis_dist1.data, 1.0)
-        y_axis_dist2 = torch.clamp(self.tanh01(G[0, 10]), y_axis_dist2.data, 1.0)
-        y_axis_dist3 = torch.clamp(self.tanh01(G[0, 11]), y_axis_dist3.data, 1.0)
+        # clamp to [y_axis_distN, 1.0]; expressed with maximum/clamp because modern
+        # torch.clamp does not accept a tensor min together with a scalar max.
+        y_axis_dist = torch.clamp(torch.maximum(self.tanh01(G[:, 9:12]), y_axis_dist.data), max=1.0)
 
-        y_axis_dist4= torch.clamp(self.tanh01(G[0, 12]), 0, y_axis_dist1.data)
-        y_axis_dist5 = torch.clamp(self.tanh01(G[0, 13]), 0, y_axis_dist2.data)
-        y_axis_dist6 = torch.clamp(self.tanh01(G[0, 14]), 0, y_axis_dist3.data)
+        # clamp to [0, y_axis_distN]
+        y_axis_dist_lo = torch.clamp(torch.minimum(self.tanh01(G[:, 12:15]), y_axis_dist.data), min=0)
 
-        # Scales
+        # Scales: (B, 9) laid out instance-major, i.e. [inst0 R,G,B, inst1 R,G,B, inst2 R,G,B]
         max_scale = 2
-        min_scale = 0
 
-        scale_factor1 = self.tanh01(G[0, 15]) * max_scale
-        scale_factor2 = self.tanh01(G[0, 16]) * max_scale
-        scale_factor3 = self.tanh01(G[0, 17]) * max_scale
+        scale_factor = self.tanh01(G[:, 15:24]) * max_scale
 
-        scale_factor4 = self.tanh01(G[0, 18]) * max_scale
-        scale_factor5 = self.tanh01(G[0, 19]) * max_scale
-        scale_factor6 = self.tanh01(G[0, 20]) * max_scale
+        slope_angle = torch.atan(slope)
 
-        scale_factor7 = self.tanh01(G[0, 21]) * max_scale
-        scale_factor8 = self.tanh01(G[0, 22]) * max_scale
-        scale_factor9= self.tanh01(G[0, 23]) * max_scale
+        # Distances between the central line and the two outer lines:
+        # d1 = o1 cos(alpha), d2 = o2 cos(alpha), alpha = atan(m) (Sec. 3.2.2)
+        d_top = self.tanh01(y_axis_dist*torch.cos(slope_angle))
+        d_bot = self.tanh01(y_axis_dist_lo*torch.cos(slope_angle))
 
-        slope1_angle = torch.atan(slope1)
-        slope2_angle = torch.atan(slope2)
-        slope3_angle = torch.atan(slope3)
+        # Soft side-of-line map: tanh01 of l(x, y) = y - (m x + c) shifted by d1,
+        # i.e. ~1 above the top line, ~0 below, ramping in between.
+        # Broadcast the per-image line parameters (B, 3) over the (H, W) grid -> (B, 3, H, W)
+        top_line = self.tanh01(y_axis - (slope.view(-1, 3, 1, 1) * x_axis + y_axis_dist.view(-1, 3, 1, 1) + d_top.view(-1, 3, 1, 1)))
 
-        # Distances between central line and two outer lines 
-        d1 = self.tanh01(y_axis_dist1*torch.cos(slope1_angle))
-        d2 = self.tanh01(y_axis_dist4*torch.cos(slope1_angle))
-        d3 = self.tanh01(y_axis_dist2*torch.cos(slope2_angle))
-        d4 = self.tanh01(y_axis_dist5*torch.cos(slope2_angle))
-        d5 = self.tanh01(y_axis_dist3*torch.cos(slope3_angle))
-        d6 = self.tanh01(y_axis_dist6*torch.cos(slope3_angle))
+        # Three filter instances, each with a per-channel (R, G, B) scaling map:
+        # (B, instance, channel, H, W).
+        mask_scale = self.get_inverted_mask(
+            scale_factor.view(-1, 3, 3, 1, 1), above_or_below_line.view(-1, 3, 1, 1, 1),
+            d_top.view(-1, 3, 1, 1, 1), d_bot.view(-1, 3, 1, 1, 1), max_scale,
+            top_line.unsqueeze(2))
+        mask_scale = torch.clamp(mask_scale, 0, max_scale)
 
-        top_line1 = self.tanh01(y_axis - (slope1 * x_axis + y_axis_dist1 + d1))
-        top_line2 = self.tanh01(y_axis - (slope2 * x_axis + y_axis_dist2 + d3))
-        top_line3 = self.tanh01(y_axis - (slope3 * x_axis + y_axis_dist3 + d5))
-
-        '''
-        The following are the scale factors for each of the 9 graduated filters
-        '''
-        mask_scale1 = self.get_inverted_mask(
-            scale_factor1, above_or_below_line1, d1, d2, max_scale, top_line1)
-        mask_scale2 = self.get_inverted_mask(
-            scale_factor2, above_or_below_line1, d1, d2, max_scale, top_line1)
-        mask_scale3 = self.get_inverted_mask(
-            scale_factor3, above_or_below_line1, d1, d2, max_scale, top_line1)
-
-        mask_scale_1 = torch.cat(
-            (mask_scale1, mask_scale2, mask_scale3), dim=0)
-        mask_scale_1 = torch.clamp(mask_scale_1.unsqueeze(0), 0, max_scale)
-
-        mask_scale4 = self.get_inverted_mask(
-            scale_factor4, above_or_below_line2, d3, d4, max_scale, top_line2)
-        mask_scale5 = self.get_inverted_mask(
-            scale_factor5, above_or_below_line2, d3, d4, max_scale, top_line2)
-        mask_scale6 = self.get_inverted_mask(
-            scale_factor6, above_or_below_line2, d3, d4, max_scale, top_line2)
-
-        mask_scale_4 = torch.cat(
-            (mask_scale4, mask_scale5, mask_scale6), dim=0)
-        mask_scale_4 = torch.clamp(mask_scale_4.unsqueeze(0), 0, max_scale)
-
-        mask_scale7 = self.get_inverted_mask(
-            scale_factor7, above_or_below_line3, d5, d6, max_scale, top_line3)
-        mask_scale8 = self.get_inverted_mask(
-            scale_factor8, above_or_below_line3, d5, d6, max_scale, top_line3)
-        mask_scale9 = self.get_inverted_mask(
-            scale_factor9, above_or_below_line3, d5, d6, max_scale, top_line3)
-
-        mask_scale_7 = torch.cat(
-            (mask_scale7, mask_scale8, mask_scale9), dim=0)
-        mask_scale_7 = torch.clamp(mask_scale_7.unsqueeze(0), 0, max_scale)
-
+        # Fuse the three instances by element-wise multiplication: s_g = prod_i s_gi (Eq. 7)
         mask_scale = torch.clamp(
-            mask_scale_1*mask_scale_4*mask_scale_7, 0, max_scale)
+            mask_scale[:, 0]*mask_scale[:, 1]*mask_scale[:, 2], 0, max_scale)
 
         return mask_scale
+
+

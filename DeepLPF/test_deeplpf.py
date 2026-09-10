@@ -107,7 +107,14 @@ def test_inversion_indicator_receives_gradient():
 # ----------------------------------------------------------- elliptical filter
 
 def test_ellipse_channel_masks_share_their_geometry():
-    """Each ellipse's three channel masks must differ only in scale factor."""
+    """Each ellipse's three channel masks must differ only in scale factor.
+
+    The nine (instance, channel) masks are produced by one batched get_mask
+    call. The geometry arguments carry an instance dimension and no channel
+    dimension, so all three channels of an instance necessarily see the same
+    ellipse; only scale_factor is per channel. Assert exactly that shape
+    contract, which is what a per-channel geometry argument would violate.
+    """
     torch.manual_seed(0)
     filt = model.EllipticalFilter()
     calls = []
@@ -120,14 +127,36 @@ def test_ellipse_channel_masks_share_their_geometry():
     filt.get_mask = recording_get_mask
     filt.get_elliptical_mask(torch.rand(1, 61, 32, 32), torch.rand(1, 3, 32, 32))
 
-    assert len(calls) == 9
-    for ellipse in range(3):
-        group = calls[ellipse * 3:(ellipse + 1) * 3]
-        for key in ("shift_x", "shift_y", "semi_axis_x", "semi_axis_y", "radius"):
-            first = group[0][key]
-            for other in group[1:]:
-                assert other[key] is first, (
-                    "ellipse %d masks disagree on %s" % (ellipse, key))
+    assert len(calls) == 1
+    kwargs = calls[0]
+    # (batch, instance, channel, H, W): geometry is broadcast over channels.
+    for key in ("shift_x", "shift_y", "semi_axis_x", "semi_axis_y"):
+        assert kwargs[key].shape == (1, 3, 1, 1, 1), key
+    assert kwargs["scale_factor"].shape == (1, 3, 3, 1, 1)
+    # The semi-axes belong to the same ellipse index as the centre.
+    assert kwargs["semi_axis_y"].shape[1] == kwargs["shift_x"].shape[1]
+
+
+def test_ellipse_geometry_is_per_instance_not_per_channel():
+    """Two channels of one instance must produce the same mask when their
+    scale factors are equal, which fails if they use different semi-axes."""
+    torch.manual_seed(0)
+    filt = model.EllipticalFilter()
+    grid_h = grid_w = 16
+    x_axis = torch.arange(grid_h).view(-1, 1).repeat(1, grid_w) / grid_h
+    y_axis = torch.arange(grid_w).repeat(grid_h, 1) / grid_w
+
+    geom = dict(shift_x=torch.rand(1, 3, 1, 1, 1),
+                shift_y=torch.rand(1, 3, 1, 1, 1),
+                semi_axis_x=torch.rand(1, 3, 1, 1, 1) + 0.1,
+                semi_axis_y=torch.rand(1, 3, 1, 1, 1) + 0.1,
+                alpha=torch.rand(1, 3, 1, grid_h, grid_w),
+                radius=torch.rand(1, 3, 1, 1, 1) + 0.1)
+    scale = torch.full((1, 3, 3, 1, 1), 1.5)
+    mask = filt.get_mask(x_axis, y_axis, scale_factor=scale, **geom)
+    for instance in range(3):
+        assert torch.equal(mask[0, instance, 0], mask[0, instance, 1])
+        assert torch.equal(mask[0, instance, 0], mask[0, instance, 2])
 
 
 # ------------------------------------------------------------------- the fuse
@@ -137,10 +166,10 @@ def test_two_neutral_branches_fuse_to_neutral():
     torch.manual_seed(0)
     head = model.DeepLPFParameterPrediction()
     neutral = torch.ones(1, 3, 16, 16)
-    head.graduated_filter.get_graduated_mask = lambda feat, img: neutral
-    head.elliptical_filter.get_elliptical_mask = lambda feat, img: neutral
+    head.graduated_filter.mask_from_input = lambda feat, img: neutral
+    head.elliptical_filter.mask_from_input = lambda feat, img: neutral
     cubic = torch.full((1, 3, 16, 16), 0.25)
-    head.cubic_filter.get_cubic_mask = lambda feat, img: cubic
+    head.cubic_filter.mask_from_input = lambda feat, img: cubic
 
     x = torch.zeros(1, 64, 16, 16)
     out = head(x)
