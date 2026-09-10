@@ -169,7 +169,11 @@ class DeepLPFLoss(nn.Module):
         pow2 = ssims ** weights
 
         # From Matlab implementation https://ece.uwaterloo.ca/~z70wang/research/iwssim/
-        output = torch.prod(pow1[:-1] * pow2[-1])
+        # MS-SSIM is prod_j cs_j^w_j (j < J) times ssim_J^w_J: a single
+        # ssim_J^w_J factor, not one per scale. `pow1[:-1] * pow2[-1]`
+        # broadcasts pow2[-1] into all four cs terms, so the product contained
+        # ssim_J^w_J four times over.
+        output = torch.prod(pow1[:-1]) * pow2[-1]
         return output
 
     def forward(self, predicted_img_batch, target_img_batch):
