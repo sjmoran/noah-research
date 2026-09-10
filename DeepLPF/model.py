@@ -984,8 +984,13 @@ class DeepLPFParameterPrediction(nn.Module):
         mask_scale_elliptical = self.elliptical_filter.get_elliptical_mask(
             feat, img_cubic)
        
+        # Fusion of the two scaling maps (Sec. 3.1). Both maps are neutral at
+        # 1, not at 0, so adding them directly makes two neutral branches
+        # compose to 2 and doubles the image before the clamp. Adding the
+        # deviations from neutral keeps the neutral element neutral:
+        # S = 1 + (s_g - 1) + (s_e - 1).
         mask_scale_fuse = torch.clamp(
-            mask_scale_graduated+mask_scale_elliptical, 0, 2)
+            1.0 + (mask_scale_graduated - 1.0) + (mask_scale_elliptical - 1.0), 0, 2)
 
         img_fuse = torch.clamp(img_cubic*mask_scale_fuse, 0, 1)
         
