@@ -9,10 +9,12 @@ import logging
 import os
 
 import torch
+import torch._dynamo  # noqa: F401  (see the note below about local imports)
 import torch.optim as optim
 
 import metric
 import model
+import trainstep
 from data import Adobe5kDataLoader, Dataset
 
 
@@ -99,9 +101,35 @@ def run_training(args, device, log_dirpath, writer):
     testing_evaluator = metric.Evaluator(
         criterion, testing_data_loader, "test", log_dirpath)
 
+    if args.use_compile:
+        # Compile after the weights are on the device, and keep the optimiser
+        # bound to the original module's parameters. FiveK has 16 distinct
+        # image sizes, which dynamo turns into 9 graphs; the default
+        # cache_size_limit is 8, so the ninth shape would silently fall back
+        # to eager for the rest of the run. Raise it, and expect the first
+        # epoch to spend minutes compiling.
+        #
+        # NB: no `import torch._dynamo` inside this function. A function-local
+        # import of a torch submodule rebinds `torch` as a local for the whole
+        # function, so every earlier `torch.` reference raises
+        # UnboundLocalError. It is imported at module scope.
+        torch._dynamo.config.cache_size_limit = 64
+        logging.info('Compiling the network with torch.compile (cache_size_limit=64)')
+        net = torch.compile(net)
+
+    if args.cuda_graphs and device.type != 'cuda':
+        raise SystemExit('--cuda_graphs needs a CUDA device')
+
     # Adam with lr 1e-4, as in the paper's implementation details (Sec. 4.1).
+    # capturable=True keeps Adam's step count on the device so the update can
+    # be captured; it is the only optimiser change graphs need.
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()),
-                           lr=1e-4, betas=(0.9, 0.999), eps=1e-08)
+                           lr=1e-4, betas=(0.9, 0.999), eps=1e-08,
+                           capturable=args.cuda_graphs)
+    amp_dtype = torch.bfloat16 if args.amp == 'bf16' else None
+    step_cls = trainstep.GraphedStep if args.cuda_graphs else trainstep.EagerStep
+    train_step = step_cls(net, criterion, optimizer, autocast_dtype=amp_dtype,
+                          gate_weight=args.gate_weight if args.learn_filter_count else None)
 
     best_valid_psnr = 0.0
 
@@ -121,16 +149,8 @@ def run_training(args, device, log_dirpath, writer):
             input_img_batch = data['input_img'].to(device, non_blocking=True)
             gt_img_batch = data['output_img'].to(device, non_blocking=True)
 
-            # Forward, loss, backward, Adam.
-            net_img_batch = torch.clamp(net(input_img_batch), 0.0, 1.0)
-            loss = criterion(net_img_batch, gt_img_batch)
-            if args.learn_filter_count:
-                # L1 on the mean gate: a penalty on the expected number of
-                # active filter instances.
-                loss = loss + args.gate_weight * net.gate_penalty
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+            # Forward, loss, backward, Adam: eager, or one graph replay.
+            loss = train_step(input_img_batch, gt_img_batch)
 
             # One device-to-host sync per step, not two.
             loss_value = loss.item()

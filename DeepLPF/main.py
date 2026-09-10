@@ -89,6 +89,12 @@ def main():
             parser.error('training needs %s; for inference pass both '
                          '--checkpoint_filepath and --inference_img_dirpath'
                          % ', '.join('--' + name for name in missing))
+    if args.tf32:
+        # Ampere and later: run matmuls and convolutions in TF32.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision('high')
+
     if args.seed is not None:
         # Seed every source the training loop draws on: weight init, the
         # DataLoader's shuffle, and the augmentation flips in data.py.
@@ -100,6 +106,8 @@ def main():
     logging.info('######### Parameters #########')
     logging.info('Number of epochs: ' + str(args.num_epoch))
     logging.info('Seed: ' + (str(args.seed) if args.seed is not None else 'unseeded (runs are not comparable)'))
+    logging.info('TF32: ' + str(args.tf32) + ', torch.compile: ' + str(args.use_compile)
+                 + ', CUDA graphs: ' + str(args.cuda_graphs) + ', amp: ' + str(args.amp))
     logging.info('Learned filter count: ' + str(args.learn_filter_count)
                  + (', gate weight ' + str(args.gate_weight)
                     if args.learn_filter_count else ''))

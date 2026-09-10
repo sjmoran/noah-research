@@ -24,6 +24,7 @@ from PIL import Image
 
 import data
 import model
+import trainstep
 import util
 
 
@@ -481,3 +482,82 @@ def test_crop_is_the_same_window_for_input_and_target(tmp_path):
         # input and target are the same image here, so an identical crop of
         # both must produce identical tensors.
         assert torch.equal(sample['input_img'], sample['output_img'])
+
+
+# ------------------------------------------------------- the training step
+
+class _EagerCapture(trainstep.GraphedStep):
+    def _capture(self, static_x, static_y):
+        for _ in range(self.warmup):
+            static_loss = trainstep.EagerStep.__call__(self, static_x, static_y).clone()
+
+        def replay():
+            # The warm-up consumed dropout draws; re-seed so the replayed
+            # step draws the same mask as the eager step it is compared with.
+            torch.manual_seed(self.seed)
+            static_loss.copy_(trainstep.EagerStep.__call__(self, static_x, static_y))
+        return static_loss, replay
+
+
+def _build(seed):
+    torch.manual_seed(seed)
+    net = model.DeepLPFNet().train()
+    opt = torch.optim.Adam(net.parameters(), lr=1e-4)
+    return net, model.DeepLPFLoss(ssim_window_size=5), opt
+
+
+def test_graphed_step_matches_eager_step_and_warmup_does_not_advance_training():
+    torch.manual_seed(0)
+    batches = [(torch.rand(1, 3, h, w), torch.rand(1, 3, h, w))
+               for h, w in ((40, 48), (48, 40), (40, 48), (48, 40), (40, 48))]
+
+    net_e, crit_e, opt_e = _build(0)
+    eager = trainstep.EagerStep(net_e, crit_e, opt_e)
+    net_g, crit_g, opt_g = _build(0)
+    graphed = _EagerCapture(net_g, crit_g, opt_g, warmup=3)
+
+    for i, (x, y) in enumerate(batches):
+        torch.manual_seed(100 + i)  # dropout draw
+        loss_e = eager(x, y)
+        graphed.seed = 100 + i
+        loss_g = graphed(x, y)
+        assert torch.equal(loss_e, loss_g), (i, loss_e, loss_g)
+
+    assert len(graphed.graphs) == 2
+    for pe, pg in zip(net_e.parameters(), net_g.parameters()):
+        assert torch.equal(pe, pg)
+    for pe, pg in zip(net_e.parameters(), net_g.parameters()):
+        if pe in opt_e.state:
+            assert torch.equal(opt_e.state[pe]['step'], opt_g.state[pg]['step'])
+            assert torch.equal(opt_e.state[pe]['exp_avg_sq'], opt_g.state[pg]['exp_avg_sq'])
+
+
+def test_eager_step_updates_the_parameters_and_returns_a_detached_loss():
+    net, crit, opt = _build(0)
+    step = trainstep.EagerStep(net, crit, opt)
+    before = [p.detach().clone() for p in net.parameters()]
+    loss = step(torch.rand(1, 3, 40, 40), torch.rand(1, 3, 40, 40))
+    assert not loss.requires_grad
+    assert any(not torch.equal(b, p) for b, p in zip(before, net.parameters()))
+
+
+def test_gate_weight_adds_the_penalty_to_the_loss():
+    torch.manual_seed(0)
+    net = model.DeepLPFNet(learn_filter_count=True).train()
+    opt = torch.optim.Adam(net.parameters(), lr=0.0)  # lr 0: compare on one input
+    crit = model.DeepLPFLoss(ssim_window_size=5)
+    x, y = torch.rand(1, 3, 40, 40), torch.rand(1, 3, 40, 40)
+
+    torch.manual_seed(7)
+    plain = trainstep.EagerStep(net, crit, opt)(x, y)
+    torch.manual_seed(7)
+    gated = trainstep.EagerStep(net, crit, opt, gate_weight=1.0)(x, y)
+    assert gated.item() > plain.item()
+    assert gated.item() == pytest.approx(plain.item() + net.gate_penalty.item(), rel=1e-5)
+
+
+def test_cuda_graphs_are_rejected_without_cuda():
+    """--cuda_graphs on a CPU-only machine must fail loudly, not silently."""
+    import train
+    assert "raise SystemExit('--cuda_graphs needs a CUDA device')" in \
+        open(train.__file__).read()

@@ -77,6 +77,28 @@ def build_parser():
              "under test. Set it for any comparison between runs.")
 
     parser.add_argument(
+        "--tf32", action="store_true",
+        help="Allow TF32 matmul/conv on Ampere+ GPUs. Faster, with a small "
+             "loss of mantissa precision. Off by default so the replication "
+             "path keeps full fp32.")
+    parser.add_argument(
+        "--compile", action="store_true", dest="use_compile",
+        help="Wrap the network in torch.compile. Fuses kernels, which is "
+             "where this model's time goes at batch size 1. Costs a one-off "
+             "compilation at startup.")
+    parser.add_argument(
+        "--cuda_graphs", action="store_true",
+        help="Capture the whole training step (forward, loss, backward, Adam) "
+             "in one CUDA graph per image shape and replay it. Removes the "
+             "per-kernel launch cost the model is bound by at batch size 1. "
+             "Same kernels and arithmetic as eager; Adam runs capturable, "
+             "which computes its bias corrections in fp32 on the device. "
+             "Requires CUDA. See trainstep.py.")
+    parser.add_argument(
+        "--amp", choices=("bf16",), default=None,
+        help="Run the network's forward pass under bf16 autocast; the loss "
+             "stays fp32. Changes the numerics, so it is off by default.")
+    parser.add_argument(
         "--learn_filter_count", action="store_true",
         help="Predict one gate per filter instance and penalise the mean gate, "
              "so the network learns how many of the three instances per branch "
