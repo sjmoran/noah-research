@@ -148,7 +148,17 @@ class ImageProcessing(object):
         :rtype: multi-dimensional numpy array
 
         """
-        img = ImageProcessing.normalise_image(np.array(Image.open(img_filepath)), normaliser)  # NB: imread normalises to 0-1
+        img = np.array(Image.open(img_filepath))
+        if img.ndim == 2:
+            # Greyscale: repeat the single channel, since every convolution in
+            # the network expects three. Without this a greyscale photograph
+            # reaches the first conv and fails with a shape mismatch.
+            img = np.stack([img] * 3, axis=2)
+        if img.ndim == 3 and img.shape[2] == 4:
+            # Drop an alpha channel if present (RGBA -> RGB); the network is
+            # trained on 3-channel RGB input.
+            img = img[:, :, :3]
+        img = ImageProcessing.normalise_image(img, normaliser)  # NB: imread normalises to 0-1
 
         return img
 
