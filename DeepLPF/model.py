@@ -87,9 +87,7 @@ class DeepLPFLoss(nn.Module):
         (_, num_channel, _, _) = img1.size()
         window = self.create_window(self.ssim_window_size, num_channel)
 
-        if img1.is_cuda:
-            window = window.cuda(img1.get_device())
-            window = window.type_as(img1)
+        window = window.to(img1.device).type_as(img1)
 
         mu1 = F.conv2d(
             img1, window, padding=self.ssim_window_size // 2, groups=num_channel)
@@ -111,12 +109,12 @@ class DeepLPFLoss(nn.Module):
         C2 = 0.03 ** 2
 
         ssim_map1 = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2))
-        ssim_map2 = ((mu1_sq.cuda() + mu2_sq.cuda() + C1) *
-                     (sigma1_sq.cuda() + sigma2_sq.cuda() + C2))
-        ssim_map = ssim_map1.cuda() / ssim_map2.cuda()
+        ssim_map2 = ((mu1_sq + mu2_sq + C1) *
+                     (sigma1_sq + sigma2_sq + C2))
+        ssim_map = ssim_map1 / ssim_map2
 
-        v1 = 2.0 * sigma12.cuda() + C2
-        v2 = sigma1_sq.cuda() + sigma2_sq.cuda() + C2
+        v1 = 2.0 * sigma12 + C2
+        v2 = sigma1_sq + sigma2_sq + C2
         cs = torch.mean(v1 / v2)
 
         return ssim_map.mean(), cs
@@ -191,15 +189,14 @@ class DeepLPFLoss(nn.Module):
         num_images = target_img_batch.shape[0]
         target_img_batch = target_img_batch
 
-        ssim_loss_value = Variable(
-            torch.cuda.FloatTensor(torch.zeros(1, 1).cuda()))
-        l1_loss_value = Variable(
-            torch.cuda.FloatTensor(torch.zeros(1, 1).cuda()))
+        device = predicted_img_batch.device
+        ssim_loss_value = torch.zeros(1, 1, device=device)
+        l1_loss_value = torch.zeros(1, 1, device=device)
 
         for i in range(0, num_images):
 
-            target_img = target_img_batch[i, :, :, :].cuda()
-            predicted_img = predicted_img_batch[i, :, :, :].cuda()
+            target_img = target_img_batch[i, :, :, :].to(device)
+            predicted_img = predicted_img_batch[i, :, :, :].to(device)
 
             predicted_img_lab = ImageProcessing.rgb_to_lab(
                 predicted_img.squeeze(0))
@@ -316,10 +313,10 @@ class CubicFilter(nn.Module):
 
         cubic_mask = torch.zeros_like(img)
 
-        x_axis = Variable(torch.arange(
-            img.shape[2]).view(-1, 1).repeat(1, img.shape[3]).cuda()) / img.shape[2]
-        y_axis = Variable(torch.arange(img.shape[3]).repeat(
-            img.shape[2], 1).cuda()) / img.shape[3]
+        x_axis = torch.arange(
+            img.shape[2], device=img.device).view(-1, 1).repeat(1, img.shape[3]) / img.shape[2]
+        y_axis = torch.arange(img.shape[3], device=img.device).repeat(
+            img.shape[2], 1) / img.shape[3]
 
         '''
         Cubic for R channel
@@ -484,10 +481,10 @@ class GraduatedFilter(nn.Module):
         ####################### Graduated #####################
         eps = 1e-10
 
-        x_axis = Variable(torch.arange(
-            img.shape[2]).view(-1, 1).repeat(1, img.shape[3]).cuda()) / img.shape[2]
-        y_axis = Variable(torch.arange(img.shape[3]).repeat(
-            img.shape[2], 1).cuda()) / img.shape[3]
+        x_axis = torch.arange(
+            img.shape[2], device=img.device).view(-1, 1).repeat(1, img.shape[3]) / img.shape[2]
+        y_axis = torch.arange(img.shape[3], device=img.device).repeat(
+            img.shape[2], 1) / img.shape[3]
 
         feat_graduated = torch.cat((feat, img), 1)
         feat_graduated = self.upsample(feat_graduated)
@@ -710,10 +707,10 @@ class EllipticalFilter(nn.Module):
         # https://math.stackexchange.com/questions/426150/what-is-the-general-equation-of-the-ellipse-that-is-not-in-the-origin-and-rotate
         
         # Normalised coordinates for x and y-axes, we instantiate the ellipses in these coordinates
-        x_axis = Variable(torch.arange(
-            img.shape[2]).view(-1, 1).repeat(1, img.shape[3]).cuda()) / img.shape[2]
-        y_axis = Variable(torch.arange(img.shape[3]).repeat(
-            img.shape[2], 1).cuda()) / img.shape[3]
+        x_axis = torch.arange(
+            img.shape[2], device=img.device).view(-1, 1).repeat(1, img.shape[3]) / img.shape[2]
+        y_axis = torch.arange(img.shape[3], device=img.device).repeat(
+            img.shape[2], 1) / img.shape[3]
 
         # x coordinate - h position
         right_x = (img.shape[2] - 1) / img.shape[2]
@@ -972,14 +969,10 @@ class DeepLPFParameterPrediction(nn.Module):
         :rtype: Tensor
 
         """
-        x.contiguous()  # remove memory holes
-        x.cuda()
+        x = x.contiguous()  # remove memory holes
 
         feat = x[:, 3:64, :, :]
         img = x[:, 0:3, :, :]
-
-        torch.cuda.empty_cache()
-        shape = x.shape
 
         img_cubic = self.cubic_filter.get_cubic_mask(feat, img)
        
