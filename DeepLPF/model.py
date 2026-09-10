@@ -805,7 +805,7 @@ class EllipticalFilter(nn.Module):
                                     radius=radius_2)
 
         mask_scale6 = self.get_mask(x_axis, y_axis,
-                                    shift_x=x_coord2, shift_y=y_coord2, semi_axis_x=a2, semi_axis_y=b3, alpha=angle_2, scale_factor=scale6,
+                                    shift_x=x_coord2, shift_y=y_coord2, semi_axis_x=a2, semi_axis_y=b2, alpha=angle_2, scale_factor=scale6,
                                     radius=radius_2)
 
         mask_scale_4 = torch.cat(
