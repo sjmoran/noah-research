@@ -66,7 +66,9 @@ def run_training(args, device, log_dirpath, writer):
     validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=1,
                                                      shuffle=False,
                                                      num_workers=0)
-    net = model.DeepLPFNet()
+    net = model.DeepLPFNet(
+        learn_filter_count=args.learn_filter_count,
+        colour_knots=args.colour_knots if args.colour_head else None)
     if args.checkpoint_filepath is not None:
         # Fine-tuning from a saved model. This flag used to be read only on the
         # inference path, so passing it here silently trained from scratch and
@@ -116,6 +118,10 @@ def run_training(args, device, log_dirpath, writer):
             # Forward, loss, backward, Adam.
             net_img_batch = torch.clamp(net(input_img_batch), 0.0, 1.0)
             loss = criterion(net_img_batch, gt_img_batch)
+            if args.learn_filter_count:
+                # L1 on the mean gate: a penalty on the expected number of
+                # active filter instances.
+                loss = loss + args.gate_weight * net.gate_penalty
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()

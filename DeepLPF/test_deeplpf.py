@@ -320,3 +320,97 @@ def test_backward_pass_produces_finite_gradients():
 
 def test_get_device_returns_a_device():
     assert isinstance(util.get_device(), torch.device)
+
+
+# --------------------------------------------------- optional capabilities
+
+def test_defaults_leave_the_architecture_untouched():
+    """Both optional features off must give the released architecture."""
+    torch.manual_seed(0)
+    plain = model.DeepLPFNet()
+    torch.manual_seed(0)
+    explicit = model.DeepLPFNet(learn_filter_count=False, colour_knots=None)
+    assert list(plain.state_dict()) == list(explicit.state_dict())
+    assert not hasattr(plain.deeplpfnet, 'colour_head')
+    # 24 predicted parameters per branch, no gates.
+    assert plain.deeplpfnet.graduated_filter.fc_graduated.out_features == 24
+    assert plain.deeplpfnet.elliptical_filter.fc_elliptical.out_features == 24
+    for a, b in zip(plain.state_dict().values(), explicit.state_dict().values()):
+        assert torch.equal(a, b)
+
+
+def test_gates_add_three_outputs_per_branch_and_a_penalty():
+    torch.manual_seed(0)
+    net = model.DeepLPFNet(learn_filter_count=True)
+    assert net.deeplpfnet.graduated_filter.fc_graduated.out_features == 27
+    assert net.deeplpfnet.elliptical_filter.fc_elliptical.out_features == 27
+    net.eval()
+    with torch.no_grad():
+        net(torch.rand(1, 3, 48, 48))
+    assert 0.0 <= net.gate_penalty.item() <= 1.0
+
+
+def test_gate_penalty_is_differentiable():
+    torch.manual_seed(0)
+    net = model.DeepLPFNet(learn_filter_count=True)
+    net(torch.rand(1, 3, 48, 48))
+    net.gate_penalty.backward()
+    grad = net.deeplpfnet.graduated_filter.fc_graduated.weight.grad
+    assert grad is not None and grad.abs().sum() > 0
+
+
+def test_a_zero_gate_removes_its_instance_from_the_product():
+    from filtercommon import _apply_gates
+    torch.manual_seed(0)
+    mask = torch.rand(1, 3, 3, 4, 4) * 2
+    gates = torch.tensor([[0.0, 1.0, 0.0]])
+    gated = _apply_gates(mask, gates)
+    assert torch.equal(gated[:, 0], torch.ones_like(mask[:, 0]))
+    assert torch.equal(gated[:, 2], torch.ones_like(mask[:, 2]))
+    assert torch.equal(gated[:, 1], mask[:, 1])
+
+
+def test_colour_head_is_the_identity_at_initialisation():
+    torch.manual_seed(0)
+    head = model.ColourHead(64, knots=16)
+    img = torch.rand(1, 3, 16, 16)
+    context = torch.rand(1, 64, 16, 16)
+    assert torch.allclose(head(context, img), img, atol=1e-6)
+
+
+def test_colour_head_off_gives_the_same_weights_as_on_at_the_same_seed():
+    """ColourHead is constructed last, so it must not disturb the RNG stream."""
+    torch.manual_seed(0)
+    without = model.DeepLPFNet()
+    torch.manual_seed(0)
+    with_head = model.DeepLPFNet(colour_knots=16)
+    shared = without.state_dict()
+    other = with_head.state_dict()
+    for key in shared:
+        assert torch.equal(shared[key], other[key]), key
+
+
+def test_colour_head_network_starts_from_the_unmodified_output():
+    torch.manual_seed(0)
+    without = model.DeepLPFNet()
+    torch.manual_seed(0)
+    with_head = model.DeepLPFNet(colour_knots=16)
+    without.eval()
+    with_head.eval()
+    img = torch.rand(1, 3, 48, 48)
+    with torch.no_grad():
+        assert torch.allclose(without(img), with_head(img), atol=1e-6)
+
+
+def test_colour_head_can_mix_channels_once_trained():
+    """The head must be able to express what the diagonal filters cannot."""
+    torch.manual_seed(0)
+    head = model.ColourHead(64, knots=0)
+    # Swap R and B through the mixer: dM = swap - I.
+    swap = torch.tensor([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+    with torch.no_grad():
+        head.fc.bias[0:9] = (swap - torch.eye(3)).reshape(-1)
+    img = torch.rand(1, 3, 8, 8)
+    out = head(torch.zeros(1, 64, 8, 8), img)
+    assert torch.allclose(out[:, 0], img[:, 2], atol=1e-6)
+    assert torch.allclose(out[:, 2], img[:, 0], atol=1e-6)

@@ -17,5 +17,5 @@ rest keep resolving.
 from cubic import CubicFilter  # noqa: F401
 from elliptical import EllipticalFilter  # noqa: F401
 from filtercommon import (_GRID_CACHE, BinaryLayer, SignSTE,  # noqa: F401
-                          _coord_grid_powers, _coord_grids)
+                          _apply_gates, _coord_grid_powers, _coord_grids)
 from graduated import GraduatedFilter  # noqa: F401

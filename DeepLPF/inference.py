@@ -51,7 +51,9 @@ def run_inference(args, device, log_dirpath):
     logging.info("Performing inference with images in directory: "
                  + inference_img_dirpath)
 
-    net = model.DeepLPFNet()
+    net = model.DeepLPFNet(
+        learn_filter_count=args.learn_filter_count,
+        colour_knots=args.colour_knots if args.colour_head else None)
     net.load_state_dict(torch.load(checkpoint_filepath, map_location=device))
     net.to(device)
     net.eval()

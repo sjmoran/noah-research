@@ -97,6 +97,11 @@ def main():
     logging.info('######### Parameters #########')
     logging.info('Number of epochs: ' + str(args.num_epoch))
     logging.info('Seed: ' + (str(args.seed) if args.seed is not None else 'unseeded (runs are not comparable)'))
+    logging.info('Learned filter count: ' + str(args.learn_filter_count)
+                 + (', gate weight ' + str(args.gate_weight)
+                    if args.learn_filter_count else ''))
+    logging.info('Colour head: ' + (str(args.colour_knots) + ' curve knots'
+                                    if args.colour_head else 'off'))
     logging.info('Logging directory: ' + str(log_dirpath))
     logging.info('Dump validation accuracy every: ' + str(args.valid_every))
     logging.info('Training image directory: ' + str(args.training_img_dirpath))

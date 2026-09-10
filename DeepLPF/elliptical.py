@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 
 from blocks import ConvBlock, GlobalPoolingBlock, MaxPoolBlock
-from filtercommon import _coord_grids
+from filtercommon import GATES_PER_BRANCH, _apply_gates, _coord_grids
 
 
 class EllipticalFilter(nn.Module):
@@ -30,16 +30,19 @@ class EllipticalFilter(nn.Module):
     multiplication (Eq. 7) into ``s_e``. Scalings are bounded to [0, max_scale = 2].
     """
 
-    def __init__(self, num_in_channels=64, num_out_channels=64):
+    def __init__(self, num_in_channels=64, num_out_channels=64,
+                 learn_filter_count=False):
         """Build the elliptical-filter branch.
 
         :param num_in_channels: number of input feature-map channels
         :param num_out_channels: number of channels used by the conv stack
+        :param learn_filter_count: predict one gate per filter instance
         :returns: N/A
         :rtype: N/A
 
         """
         super(EllipticalFilter, self).__init__()
+        self.learn_filter_count = learn_filter_count
 
         self.elliptical_layer1 = ConvBlock(num_in_channels, num_out_channels)
         self.elliptical_layer2 = MaxPoolBlock()
@@ -49,8 +52,10 @@ class EllipticalFilter(nn.Module):
         self.elliptical_layer6 = MaxPoolBlock()
         self.elliptical_layer7 = ConvBlock(num_out_channels, num_out_channels)
         self.elliptical_layer8 = GlobalPoolingBlock()
+        # 24 filter parameters, plus one gate per instance when the filter
+        # count is learned.
         self.fc_elliptical = torch.nn.Linear(
-            num_out_channels, 24)
+            num_out_channels, 24 + (GATES_PER_BRANCH if learn_filter_count else 0))
         self.upsample = torch.nn.Upsample(size=(300, 300), mode='bilinear',align_corners=False)
         self.dropout = nn.Dropout(0.5)
 
@@ -213,6 +218,11 @@ class EllipticalFilter(nn.Module):
                                    shift_x=x_coord, shift_y=y_coord, semi_axis_x=a, semi_axis_y=semi_axis_y,
                                    alpha=angle, scale_factor=scale, radius=radius)
         mask_scale_rad = torch.clamp(mask_scale, 0, max_scale)
+
+        # `--learn_filter_count`: see GraduatedFilter.mask_from_input.
+        if self.learn_filter_count:
+            self.gates = self.tanh01(G[:, 24:27])
+            mask_scale_rad = _apply_gates(mask_scale_rad, self.gates)
 
         # Fuse the three instances by element-wise multiplication: s_e = prod_i s_ei (Eq. 7)
         mask_scale_elliptical = torch.clamp(

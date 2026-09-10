@@ -66,4 +66,25 @@ def build_parser():
              "arms of an ablation differ by luck as well as by the change "
              "under test. Set it for any comparison between runs.")
 
+    parser.add_argument(
+        "--learn_filter_count", action="store_true",
+        help="Predict one gate per filter instance and penalise the mean gate, "
+             "so the network learns how many of the three instances per branch "
+             "an image needs instead of always using all three. Off by "
+             "default; the default architecture is unchanged.")
+    parser.add_argument(
+        "--gate_weight", type=float, required=False, default=3e-3,
+        help="Weight on the L1 gate penalty of --learn_filter_count. Too small "
+             "and every gate pins at 1; too large and the branches collapse to "
+             "the identity.")
+    parser.add_argument(
+        "--colour_head", action="store_true",
+        help="Apply a global colour mixer and per-channel tone curve before the "
+             "cubic filter. Every filter head is diagonal, so without this no "
+             "filter can express white balance, saturation or a hue shift. Off "
+             "by default; identity at initialisation when on.")
+    parser.add_argument(
+        "--colour_knots", type=int, required=False, default=16,
+        help="Knots in the tone curve of --colour_head; 0 keeps the mixer alone.")
+
     return parser

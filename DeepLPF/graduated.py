@@ -13,7 +13,8 @@ import torch
 import torch.nn as nn
 
 from blocks import ConvBlock, GlobalPoolingBlock, MaxPoolBlock
-from filtercommon import BinaryLayer, _coord_grids
+from filtercommon import (GATES_PER_BRANCH, BinaryLayer, _apply_gates,
+                          _coord_grids)
 
 
 class GraduatedFilter(nn.Module):
@@ -30,16 +31,19 @@ class GraduatedFilter(nn.Module):
     (Eq. 7) into ``s_g``. Scalings are bounded to [0, max_scale = 2].
     """
 
-    def __init__(self, num_in_channels=64, num_out_channels=64):
+    def __init__(self, num_in_channels=64, num_out_channels=64,
+                 learn_filter_count=False):
         """Initialisation function for the graduated filter
 
         :param num_in_channels:  input channels
         :param num_out_channels: output channels
+        :param learn_filter_count: predict one gate per filter instance
         :returns: N/A
         :rtype: N/A
 
         """
         super(GraduatedFilter, self).__init__()
+        self.learn_filter_count = learn_filter_count
 
         self.graduated_layer1 = ConvBlock(num_in_channels, num_out_channels)
         self.graduated_layer2 = MaxPoolBlock()
@@ -49,8 +53,11 @@ class GraduatedFilter(nn.Module):
         self.graduated_layer6 = MaxPoolBlock()
         self.graduated_layer7 = ConvBlock(num_out_channels, num_out_channels)
         self.graduated_layer8 = GlobalPoolingBlock()
+        # 24 filter parameters, plus one gate per instance when the filter
+        # count is learned. The extra outputs change the layer shape, so gated
+        # and ungated checkpoints are not interchangeable.
         self.fc_graduated = torch.nn.Linear(
-            num_out_channels, 24)
+            num_out_channels, 24 + (GATES_PER_BRANCH if learn_filter_count else 0))
         self.upsample = torch.nn.Upsample(size=(300, 300), mode='bilinear',align_corners=False)
         self.dropout = nn.Dropout(0.5)
         self.bin_layer = BinaryLayer()
@@ -232,6 +239,13 @@ class GraduatedFilter(nn.Module):
             d_top.view(-1, 3, 1, 1, 1), d_bot.view(-1, 3, 1, 1, 1), max_scale,
             top_line.unsqueeze(2))
         mask_scale = torch.clamp(mask_scale, 0, max_scale)
+
+        # `--learn_filter_count`: one learned gate per instance, so the branch
+        # can use fewer than three filters. Applied before the product, where a
+        # gate at zero makes its instance exactly 1 and drops out of the fuse.
+        if self.learn_filter_count:
+            self.gates = self.tanh01(G[:, 24:27])
+            mask_scale = _apply_gates(mask_scale, self.gates)
 
         # Fuse the three instances by element-wise multiplication: s_g = prod_i s_gi (Eq. 7)
         mask_scale = torch.clamp(

@@ -4,15 +4,21 @@
 #This program is free software; you can redistribute it and/or modify it under the terms of the BSD 0-Clause License.
 
 #This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD 0-Clause License for more details.
-"""Pieces the three filter heads share: the coordinate grids and the STE.
+"""Pieces the three filter heads share: coordinate grids, the STE, the gates.
 
 The grids are cached because every head builds the same ones for a given image
 size. ``BinaryLayer`` is the straight-through binarisation of Sec. 3.2.2, used
-by the graduated filter.
+by the graduated filter, and ``_apply_gates`` scales one filter instance's
+deviation from neutral by its predicted gate (the optional
+``--learn_filter_count`` feature).
 """
 import torch
 import torch.nn as nn
 
+
+#: Instances per filter branch, and so the number of gates when the filter
+#: count is learned.
+GATES_PER_BRANCH = 3
 
 #: Coordinate grids keyed by (H, W, device); every filter head builds the same
 #: ones for a given image size, so they are built once and reused.
@@ -96,3 +102,22 @@ class BinaryLayer(nn.Module):
 
         """
         return SignSTE.apply(input)
+
+
+def _apply_gates(mask_scale, gates):
+    """Scale each instance's deviation from neutral by its gate.
+
+    ``1 + g * (s - 1)`` is the identity at ``g = 0`` and leaves ``s`` untouched
+    at ``g = 1``. Since instances fuse by multiplication and 1 is the
+    multiplicative identity, a gate at zero removes its instance from the
+    product exactly, at no cost to the remaining ones - which is what makes an
+    L1 penalty on the gates a penalty on the number of active filters.
+
+    :param mask_scale: per-instance scaling maps, (B, instance, channel, H, W)
+    :param gates: gate per instance in [0, 1], (B, instance)
+    :returns: gated scaling maps, same shape as ``mask_scale``
+    :rtype: Tensor
+
+    """
+    g = gates.view(-1, gates.shape[1], 1, 1, 1)
+    return 1.0 + g * (mask_scale - 1.0)
