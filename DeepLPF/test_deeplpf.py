@@ -561,3 +561,88 @@ def test_cuda_graphs_are_rejected_without_cuda():
     import train
     assert "raise SystemExit('--cuda_graphs needs a CUDA device')" in \
         open(train.__file__).read()
+
+
+# ------------------------------------------------------- the deeplpf command
+
+def test_gather_images_expands_directories_and_skips_non_images(tmp_path):
+    import deeplpf_cli
+    rng = np.random.default_rng(0)
+    px = rng.integers(0, 255, (40, 40, 3), dtype=np.uint8)
+    for name in ('b.png', 'a.jpg'):
+        Image.fromarray(px).save(str(tmp_path / name))
+    (tmp_path / 'notes.txt').write_text('not an image')
+    found = deeplpf_cli.gather_images([str(tmp_path)])
+    assert [os.path.basename(p) for p in found] == ['a.jpg', 'b.png']
+
+
+def test_enhance_writes_one_output_per_input(tmp_path):
+    import deeplpf_cli
+    rng = np.random.default_rng(0)
+    Image.fromarray(rng.integers(0, 255, (48, 48, 3), dtype=np.uint8)).save(
+        str(tmp_path / 'photo.png'))
+
+    torch.manual_seed(0)
+    net = model.DeepLPFNet()
+    checkpoint = tmp_path / 'model.pt'
+    torch.save(net.state_dict(), str(checkpoint))
+
+    out_dir = tmp_path / 'out'
+    status = deeplpf_cli.main(['enhance', str(tmp_path / 'photo.png'),
+                               '--out', str(out_dir),
+                               '--checkpoint', str(checkpoint),
+                               '--device', 'cpu'])
+    assert status == 0
+    written = out_dir / 'photo_enhanced.png'
+    assert written.is_file()
+    assert np.array(Image.open(str(written))).shape == (48, 48, 3)
+
+
+def test_enhance_reports_an_undersized_image_and_keeps_going(tmp_path):
+    import deeplpf_cli
+    rng = np.random.default_rng(0)
+    Image.fromarray(rng.integers(0, 255, (16, 16, 3), dtype=np.uint8)).save(
+        str(tmp_path / 'tiny.png'))
+    Image.fromarray(rng.integers(0, 255, (48, 48, 3), dtype=np.uint8)).save(
+        str(tmp_path / 'ok.png'))
+
+    torch.manual_seed(0)
+    checkpoint = tmp_path / 'model.pt'
+    torch.save(model.DeepLPFNet().state_dict(), str(checkpoint))
+
+    out_dir = tmp_path / 'out'
+    status = deeplpf_cli.main(['enhance', str(tmp_path),
+                               '--out', str(out_dir),
+                               '--checkpoint', str(checkpoint),
+                               '--device', 'cpu'])
+    # One failure out of two is not a failed run.
+    assert status == 0
+    assert (out_dir / 'ok_enhanced.png').is_file()
+    assert not (out_dir / 'tiny_enhanced.png').exists()
+
+
+def test_enhance_accepts_a_greyscale_photograph(tmp_path):
+    import deeplpf_cli
+    rng = np.random.default_rng(0)
+    Image.fromarray(rng.integers(0, 255, (48, 48), dtype=np.uint8), mode='L').save(
+        str(tmp_path / 'grey.png'))
+    torch.manual_seed(0)
+    checkpoint = tmp_path / 'model.pt'
+    torch.save(model.DeepLPFNet().state_dict(), str(checkpoint))
+    out_dir = tmp_path / 'out'
+    assert deeplpf_cli.main(['enhance', str(tmp_path / 'grey.png'),
+                             '--out', str(out_dir),
+                             '--checkpoint', str(checkpoint),
+                             '--device', 'cpu']) == 0
+    assert (out_dir / 'grey_enhanced.png').is_file()
+
+
+def test_released_checkpoint_loads_into_the_current_model():
+    """The weights shipped in this repository must still load strictly."""
+    import glob
+    matches = sorted(glob.glob(os.path.join(os.path.dirname(model.__file__),
+                                            'pretrained_models', '*', '*.pt')))
+    if not matches:
+        pytest.skip('no bundled checkpoint in this checkout')
+    net = model.DeepLPFNet()
+    net.load_state_dict(torch.load(matches[0], map_location='cpu'), strict=True)
