@@ -218,6 +218,32 @@ class DeepLPFLoss(nn.Module):
         return deeplpf_loss
 
 
+class SignSTE(torch.autograd.Function):
+    """sign() with a straight-through gradient (Courbariaux et al.)
+
+    The forward pass binarises; the backward pass passes the gradient through
+    unchanged except where the input has saturated (|input| > 1), where it is
+    zeroed.
+
+    This is implemented as a torch.autograd.Function because that is the only
+    place autograd calls a user-defined backward. A backward() defined as a
+    plain method on an nn.Module is never called by autograd, so the gradient
+    seen by the layer's input would be torch.sign's own gradient, which is zero
+    everywhere.
+
+    """
+
+    @staticmethod
+    def forward(ctx, input):
+        ctx.save_for_backward(input)
+        return torch.sign(input)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, = ctx.saved_tensors
+        return grad_output * (input.abs() <= 1).to(grad_output.dtype)
+
+
 class BinaryLayer(nn.Module):
 
     def forward(self, input):
@@ -228,20 +254,7 @@ class BinaryLayer(nn.Module):
         :rtype: Tensor
 
         """
-        return torch.sign(input)
-
-    def backward(self, grad_output):
-        """Straight through estimator
-
-        :param grad_output: gradient tensor
-        :returns: truncated gradient tensor
-        :rtype: Tensor
-
-        """
-        input = self.saved_tensors
-        grad_output[input > 1] = 0
-        grad_output[input < -1] = 0
-        return grad_output
+        return SignSTE.apply(input)
 
 
 class CubicFilter(nn.Module):
