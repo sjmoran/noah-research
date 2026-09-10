@@ -82,6 +82,11 @@ def main():
     is_inference = (args.checkpoint_filepath is not None) and (
         args.inference_img_dirpath is not None)
 
+    if is_inference and args.inference_img_list_path is None:
+        parser.error(
+            "inference requires --inference_img_list_path, a plain text file "
+            "listing the ids of the images to enhance")
+
     if not is_inference:
         # The training path needs the list files; argparse used to enforce
         # them with required=True, which rejected the inference command
