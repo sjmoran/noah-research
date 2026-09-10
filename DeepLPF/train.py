@@ -27,7 +27,8 @@ def run_training(args, device, log_dirpath, writer):
 
     """
     num_epoch = args.num_epoch
-    BATCH_SIZE = 1
+    BATCH_SIZE = args.batch_size
+    crop_size = args.crop_size
     valid_every = args.valid_every
     training_img_dirpath = args.training_img_dirpath
     train_img_list_path = args.train_img_list_path
@@ -39,8 +40,13 @@ def run_training(args, device, log_dirpath, writer):
                                              img_ids_filepath=train_img_list_path)
     training_data_dict = training_data_loader.load_data()
 
-    training_dataset = Dataset(data_dict=training_data_dict, normaliser=1,
-                               is_valid=False)
+    if BATCH_SIZE > 1 and crop_size <= 0:
+        logging.warning(
+            "batch_size > 1 requires uniform image sizes; FiveK images vary. "
+            "Pass --crop_size (e.g. --crop_size 256) or the data loader will "
+            "fail to collate. Continuing anyway.")
+    training_dataset = Dataset(data_dict=training_data_dict, normaliser=1, is_valid=False,
+                               crop_size=(crop_size if crop_size > 0 else None))
 
     validation_data_loader = Adobe5kDataLoader(data_dirpath=training_img_dirpath,
                                            img_ids_filepath=valid_img_list_path)

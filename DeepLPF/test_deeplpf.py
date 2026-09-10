@@ -414,3 +414,70 @@ def test_colour_head_can_mix_channels_once_trained():
     out = head(torch.zeros(1, 64, 8, 8), img)
     assert torch.allclose(out[:, 0], img[:, 2], atol=1e-6)
     assert torch.allclose(out[:, 2], img[:, 0], atol=1e-6)
+
+
+# ------------------------------------------------------------- batching
+
+def test_batched_forward_matches_per_image_forward():
+    """A batch must give each image the same result as running it alone."""
+    torch.manual_seed(0)
+    net = model.DeepLPFNet()
+    net.eval()
+    x = torch.rand(4, 3, 48, 48)
+    with torch.no_grad():
+        batched = net(x)
+        one_at_a_time = torch.cat([net(x[i:i + 1]) for i in range(4)])
+    assert torch.allclose(batched, one_at_a_time, atol=1e-6)
+
+
+def test_graduated_branch_decides_per_image_not_per_batch():
+    """Images in one batch may take different sides of the factor >= 1 split."""
+    torch.manual_seed(0)
+    filt = model.GraduatedFilter()
+    factor = torch.tensor([[[[[0.4]]]], [[[[1.6]]]]])       # (2, 1, 1, 1, 1)
+    invert = torch.tensor([[[[[1.0]]]], [[[[0.0]]]]])
+    d1 = torch.full((2, 1, 1, 1, 1), 0.4)
+    d2 = torch.full((2, 1, 1, 1, 1), 0.3)
+    top_line = torch.rand(2, 1, 1, 8, 8)
+    mask = filt.get_inverted_mask(factor, invert, d1, d2, 2, top_line)
+    # factor < 1 clamps into [0, 1]; factor >= 1 clamps into [1, 2].
+    assert mask[0].max() <= 1.0 + 1e-6
+    assert mask[1].min() >= 1.0 - 1e-6
+
+
+def test_crop_size_gives_uniform_shapes_for_collation(tmp_path):
+    rng = np.random.default_rng(0)
+    for i, (h, w) in enumerate([(40, 60), (55, 48)]):
+        px = rng.integers(0, 255, (h, w, 3), dtype=np.uint8)
+        _write_image(str(tmp_path / "input" / ("a%04d-x.png" % i)), px)
+        _write_image(str(tmp_path / "output" / ("a%04d-x.png" % i)), px)
+    ids = tmp_path / "ids.txt"
+    ids.write_text("a0000\na0001\n")
+    loaded = data.Adobe5kDataLoader(str(tmp_path), str(ids)).load_data()
+
+    uncropped = data.Dataset(data_dict=loaded, normaliser=255, is_valid=False)
+    assert uncropped[0]['input_img'].shape != uncropped[1]['input_img'].shape
+
+    cropped = data.Dataset(data_dict=loaded, normaliser=255, is_valid=False,
+                           crop_size=32)
+    batch = torch.utils.data.DataLoader(cropped, batch_size=2)
+    sample = next(iter(batch))
+    assert sample['input_img'].shape == (2, 3, 32, 32)
+    assert sample['output_img'].shape == (2, 3, 32, 32)
+
+
+def test_crop_is_the_same_window_for_input_and_target(tmp_path):
+    rng = np.random.default_rng(1)
+    px = rng.integers(0, 255, (40, 40, 3), dtype=np.uint8)
+    _write_image(str(tmp_path / "input" / "a0000-x.png"), px)
+    _write_image(str(tmp_path / "output" / "a0000-x.png"), px)
+    ids = tmp_path / "ids.txt"
+    ids.write_text("a0000\n")
+    loaded = data.Adobe5kDataLoader(str(tmp_path), str(ids)).load_data()
+    dataset = data.Dataset(data_dict=loaded, normaliser=255, is_valid=False,
+                           crop_size=16)
+    for _ in range(5):
+        sample = dataset[0]
+        # input and target are the same image here, so an identical crop of
+        # both must produce identical tensors.
+        assert torch.equal(sample['input_img'], sample['output_img'])

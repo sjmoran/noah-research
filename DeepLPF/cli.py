@@ -26,6 +26,16 @@ def build_parser():
         "--num_epoch", type=int, required=False,
         help="Number of epochs (default 100000)", default=100000)
     parser.add_argument(
+        "--batch_size", type=int, required=False, default=1,
+        help="Training batch size (default 1). Evaluation and inference always "
+             "run at 1 so per-image PSNR/SSIM are reported individually. To "
+             "reproduce the paper's reported results, train at 1.")
+    parser.add_argument(
+        "--crop_size", type=int, required=False, default=0,
+        help="If >0, randomly crop training images to this square size. "
+             "Required for --batch_size>1 because FiveK images vary in size "
+             "and the default collation needs a uniform size.")
+    parser.add_argument(
         "--valid_every", type=int, required=False,
         help="Number of epochs after which to compute validation accuracy",
         default=25)

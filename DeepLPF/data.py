@@ -34,17 +34,24 @@ np.set_printoptions(threshold=sys.maxsize)
 
 class Dataset(torch.utils.data.Dataset):
 
-    def __init__(self, data_dict, transform=None, normaliser=2 ** 8 - 1, is_valid=False, is_inference=False):
+    def __init__(self, data_dict, transform=None, normaliser=2 ** 8 - 1, is_valid=False,
+                 is_inference=False, crop_size=None):
         """Initialisation for the Dataset object
 
         :param data_dict: dictionary of dictionaries containing images
         :param transform: PyTorch image transformations to apply to the images
+        :param crop_size: if set, training images are randomly cropped to this
+            square size, the same crop being applied to input and target.
+            Needed for a batch size greater than one, since FiveK images vary
+            in size and the default collation requires a uniform size. Ignored
+            for validation and inference.
         :returns: N/A
         :rtype: N/A
 
         """
         self.transform = transform
         self.data_dict = data_dict
+        self.crop_size = crop_size
         self.normaliser = normaliser
         self.is_valid = is_valid
         self.is_inference = is_inference
@@ -125,6 +132,18 @@ class Dataset(torch.utils.data.Dataset):
                         if random.random() > 0.5:
                             input_img = TF.vflip(input_img)
                             output_img = TF.vflip(output_img)
+
+                    # Random square crop, the same crop for input and
+                    # target, so that a batch size > 1 can collate
+                    # variable-size images.
+                    if self.crop_size:
+                        width, height = input_img.size
+                        crop = min(self.crop_size, width, height)
+                        left = random.randint(0, width - crop)
+                        top = random.randint(0, height - crop)
+                        box = (left, top, left + crop, top + crop)
+                        input_img = input_img.crop(box)
+                        output_img = output_img.crop(box)
 
                 # Transform to tensor
                 input_img = TF.to_tensor(input_img)

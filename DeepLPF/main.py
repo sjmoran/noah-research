@@ -19,8 +19,11 @@ Instructions:
 
 To get this code working on your system / problem please see the README.
 
-BATCH SIZE: this code is designed for a batch size of 1. To reproduce the
-paper's reported results, use a batch size of 1.
+BATCH SIZE: training supports a batch size greater than one via --batch_size,
+which needs --crop_size because FiveK images vary in size. Evaluation and
+inference run at a batch size of 1 so per-image PSNR/SSIM are reported and
+saved individually. To reproduce the paper's reported results, train with a
+batch size of 1.
 '''
 import datetime
 import logging
@@ -120,6 +123,11 @@ def main():
     else:
         device = torch.device("cpu")
     logging.info('Using device: ' + str(device))
+
+    # Training batch size is configurable; evaluation and inference always run
+    # at a batch size of 1 so per-image PSNR/SSIM are reported and saved.
+    logging.info('Training batch size: ' + str(args.batch_size)
+                 + (', crop ' + str(args.crop_size) if args.crop_size else ''))
 
     if inference_run:
         inference.run_inference(args, device, log_dirpath)
