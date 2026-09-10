@@ -430,34 +430,39 @@ class GraduatedFilter(nn.Module):
         :rtype: Tensor
 
         """
-        if (invert == 1).all():
-
-            if (factor >= 1).all():
-                diff = ((factor-1))/2 + 1
-                grad1 = (diff-factor)/d1
-                grad2 = (1-diff)/d2
-                mask_scale = torch.clamp(
-                    factor+grad1*top_line+grad2*top_line, min=1, max=max_scale)
-            else:
-                diff = ((1-factor))/2 + factor
-                grad1 = (diff-factor)/d1
-                grad2 = (1-diff)/d2
-                mask_scale = torch.clamp(
-                    factor+grad1*top_line+grad2*top_line, min=0, max=1)
+        # `invert` is the binarised g_inv of Eq. 3. Selecting the branch with a
+        # Python `if` (or, equivalently, with torch.where, whose condition is
+        # not differentiable) means g_inv never enters the arithmetic, so no
+        # gradient reaches it and the indicator cannot be learned. Evaluate
+        # both branches and blend them by the indicator instead: `invert` is
+        # exactly 0 or 1, so the forward value is the same branch as before,
+        # but the straight-through gradient of BinaryLayer now flows to g_inv.
+        if (factor >= 1).all():
+            diff = ((factor-1))/2 + 1
+            # invert == 1
+            grad1_inv = (diff-factor)/d1
+            grad2_inv = (1-diff)/d2
+            mask_inv = factor+grad1_inv*top_line+grad2_inv*top_line
+            # invert != 1
+            grad1_non = (diff-factor)/d1
+            grad2_non = (factor-diff)/d2
+            mask_non = 1+grad1_non*top_line+grad2_non*top_line
+            min_val, max_val = 1, max_scale
         else:
+            diff = ((1-factor))/2 + factor
+            # invert == 1
+            grad1_inv = (diff-factor)/d1
+            grad2_inv = (1-diff)/d2
+            mask_inv = factor+grad1_inv*top_line+grad2_inv*top_line
+            # invert != 1
+            grad1_non = (diff-1)/d1
+            grad2_non = (factor-diff)/d2
+            mask_non = 1+grad1_non*top_line+grad2_non*top_line
+            min_val, max_val = 0, 1
 
-            if (factor >= 1).all():
-                diff = ((factor-1))/2 + 1
-                grad1 = (diff-factor)/d1
-                grad2 = (factor-diff)/d2
-                mask_scale = torch.clamp(
-                    1+grad1*top_line+grad2*top_line, min=1, max=max_scale)
-            else:
-                diff = ((1-factor))/2 + factor
-                grad1 = (diff-1)/d1
-                grad2 = (factor-diff)/d2
-                mask_scale = torch.clamp(
-                    1+grad1*top_line+grad2*top_line, min=0, max=1)
+        weight = invert.to(mask_inv.dtype)
+        mask_scale = weight*mask_inv + (1-weight)*mask_non
+        mask_scale = torch.clamp(mask_scale, min=min_val, max=max_val)
 
         mask_scale = torch.clamp(mask_scale.unsqueeze(0), 0, max_scale)
         return mask_scale
