@@ -37,7 +37,6 @@ class GraduatedFilter(nn.Module):
 
         :param num_in_channels:  input channels
         :param num_out_channels: output channels
-        :param learn_filter_count: predict one gate per filter instance
         :returns: N/A
         :rtype: N/A
 
@@ -54,8 +53,7 @@ class GraduatedFilter(nn.Module):
         self.graduated_layer7 = ConvBlock(num_out_channels, num_out_channels)
         self.graduated_layer8 = GlobalPoolingBlock()
         # 24 filter parameters, plus one gate per instance when the filter
-        # count is learned. The extra outputs change the layer shape, so gated
-        # and ungated checkpoints are not interchangeable.
+        # count is learned. The extra outputs change the layer shape, so gated and ungated checkpoints are not interchangeable.
         self.fc_graduated = torch.nn.Linear(
             num_out_channels, 24 + (GATES_PER_BRANCH if learn_filter_count else 0))
         self.upsample = torch.nn.Upsample(size=(300, 300), mode='bilinear',align_corners=False)
@@ -130,12 +128,13 @@ class GraduatedFilter(nn.Module):
         branch_inv = ramp(f, A_inv, B_inv)
         branch_non = ramp(1, A_non, B_non)
 
-        # Selecting the branch on `inv` -- with a Python `if` or with a
-        # torch.where CONDITION, neither of which is differentiable -- severs
-        # g_inv from the loss, so the inversion indicators receive no gradient
-        # even with a working straight-through estimator.
+        # A torch.where CONDITION is not differentiable, so selecting on
+        # `invert == 1` severs g_inv from the loss - a second cut, one line
+        # after the one the `ste` fix repairs. Even with a working
+        # straight-through estimator the inversion indicators receive no
+        # gradient.
         #
-        # Blend the two branches by the binarised indicator instead. The
+        # Blend the two branches with the binarised indicator instead. The
         # forward value is unchanged, because `invert` is exactly 0 or 1, but
         # now the STE's gradient reaches g_inv.
         w = invert.to(branch_inv.dtype)
@@ -171,7 +170,6 @@ class GraduatedFilter(nn.Module):
         :rtype: Tensor
 
         """
-        eps = 1e-10
 
         # Normalised pixel coordinates (see CubicFilter.get_cubic_mask)
         x_axis, y_axis = _coord_grids(img.shape[2], img.shape[3], img.device)
@@ -190,9 +188,9 @@ class GraduatedFilter(nn.Module):
         G = self.fc_graduated(x)
 
         # G has shape (B, 24); every parameter below is a per-image vector of
-        # shape (B,). Layout: [0:3] g_inv, [3:6] slope m, [6:9] and [9:12] the
-        # central-line intercept c (which doubles as offset o1; [9:12] is
-        # lower-bounded by [6:9]), [12:15] offset o2 (upper-bounded by o1),
+        # shape (B,). Layout: [0:3] g_inv, [3:6] slope m, [6:9] central-line
+        # intercept c, [9:12] offset o1, [12:15] offset o2 (as a fraction of
+        # o1, so 0 <= o2 <= o1 holds by construction),
         # [15:24] per-channel scale factors s_g (three instances x R,G,B).
         #
         # The three instances are evaluated together along a leading "instance"
@@ -206,14 +204,39 @@ class GraduatedFilter(nn.Module):
 
         slope = G[:, 3:6].clone()
 
-        y_axis_dist = self.tanh01(G[:, 6:9]) + eps
-
-        # clamp to [y_axis_distN, 1.0]; expressed with maximum/clamp because modern
-        # torch.clamp does not accept a tensor min together with a scalar max.
-        y_axis_dist = torch.clamp(torch.maximum(self.tanh01(G[:, 9:12]), y_axis_dist.data), max=1.0)
-
-        # clamp to [0, y_axis_distN]
-        y_axis_dist_lo = torch.clamp(torch.minimum(self.tanh01(G[:, 12:15]), y_axis_dist.data), min=0)
+        # Central-line intercept c, and the two offsets o1 >= o2 >= 0.
+        #
+        # These three lines used to read:
+        #
+        #     y_axis_dist = tanh01(G[:, 6:9]) + eps
+        #     y_axis_dist = clamp(maximum(tanh01(G[:, 9:12]), y_axis_dist.data), max=1)
+        #     y_axis_dist_lo = clamp(minimum(tanh01(G[:, 12:15]), y_axis_dist.data), min=0)
+        #
+        # G[:, 6:9] was consumed only through `.data`, which strips the
+        # autograd graph, so those three output units received exactly zero
+        # gradient while still setting the forward value (the floor under o1).
+        # In the shipped checkpoint they are still at their initialisation,
+        # tanh01(~0) ~= 0.5, and that untrained constant wins the maximum on
+        # two of the three filter instances for every bundled example: the top
+        # offset of those instances was a frozen 0.5, not a prediction.
+        #
+        # Removing `.data` alone is not enough. maximum/minimum route gradient
+        # to whichever argument is selected, so G[:, 6:9] and G[:, 9:12] would
+        # take turns and each still be starved on any step where the other
+        # wins (measured: rows 6-8 still all-zero in 2 of 8 seeds).
+        #
+        # A learned floor under an already-free value in (0, 1) also buys no
+        # expressiveness - o1 can simply predict the larger number itself. So
+        # the three outputs are given the job the line geometry was missing.
+        # The intercept c was conflated with o1 (the central line sat at
+        # y = m x + o1 + d1), which locked the line's position to the width of
+        # its own ramp; Eqs. 1-3 have them separate. G[:, 6:9] is now c, and
+        # o2 is predicted as a fraction of o1 so the ordering o2 <= o1 holds by
+        # construction. Every output is now on an unconditional differentiable
+        # path and both clamps are gone.
+        intercept = self.tanh01(G[:, 6:9])
+        y_axis_dist = self.tanh01(G[:, 9:12])
+        y_axis_dist_lo = y_axis_dist * self.tanh01(G[:, 12:15])
 
         # Scales: (B, 9) laid out instance-major, i.e. [inst0 R,G,B, inst1 R,G,B, inst2 R,G,B]
         max_scale = 2
@@ -230,7 +253,7 @@ class GraduatedFilter(nn.Module):
         # Soft side-of-line map: tanh01 of l(x, y) = y - (m x + c) shifted by d1,
         # i.e. ~1 above the top line, ~0 below, ramping in between.
         # Broadcast the per-image line parameters (B, 3) over the (H, W) grid -> (B, 3, H, W)
-        top_line = self.tanh01(y_axis - (slope.view(-1, 3, 1, 1) * x_axis + y_axis_dist.view(-1, 3, 1, 1) + d_top.view(-1, 3, 1, 1)))
+        top_line = self.tanh01(y_axis - (slope.view(-1, 3, 1, 1) * x_axis + intercept.view(-1, 3, 1, 1) + d_top.view(-1, 3, 1, 1)))
 
         # Three filter instances, each with a per-channel (R, G, B) scaling map:
         # (B, instance, channel, H, W).
@@ -240,9 +263,9 @@ class GraduatedFilter(nn.Module):
             top_line.unsqueeze(2))
         mask_scale = torch.clamp(mask_scale, 0, max_scale)
 
-        # `--learn_filter_count`: one learned gate per instance, so the branch
-        # can use fewer than three filters. Applied before the product, where a
-        # gate at zero makes its instance exactly 1 and drops out of the fuse.
+        # `gates` feature: one learned gate per instance, so the branch can use
+        # fewer than three filters. Applied before the product, where a gate at
+        # zero makes its instance exactly 1 and drops out of the fuse.
         if self.learn_filter_count:
             self.gates = self.tanh01(G[:, 24:27])
             mask_scale = _apply_gates(mask_scale, self.gates)
