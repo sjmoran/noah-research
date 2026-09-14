@@ -30,12 +30,6 @@ class UNet(nn.Module):
         """
         super().__init__()
 
-        self.conv1 = nn.Conv2d(16, 64, 1)
-        self.conv2 = nn.Conv2d(32, 64, 1)
-        self.conv3 = nn.Conv2d(64, 64, 1)
-
-        self.local_net = LocalNet(16)
-
         self.dconv_down1 = LocalNet(3, 16)
         self.dconv_down2 = LocalNet(16, 32)
         self.dconv_down3 = LocalNet(32, 64)
