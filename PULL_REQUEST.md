@@ -1,12 +1,12 @@
 # DeepLPF: code upgrade, a runnable entry point, a module split, and packaging
 
-24 commits against `DeepLPF/`. Nothing outside that directory is touched;
+25 commits against `DeepLPF/`. Nothing outside that directory is touched;
 `LICENSE` is not modified. I am one of the authors of this code.
 
 ```
 cd DeepLPF
 pip install -r requirements.txt
-python -m pytest test_deeplpf.py      # 44 tests, CPU only, no dataset needed
+python -m pytest test_deeplpf.py      # 45 tests, CPU only, no dataset needed
 ```
 
 ## The one commit that changes the model's output
@@ -16,14 +16,21 @@ scaling factor, neutral at 1, and they fuse as `1 + (s_g - 1) + (s_e - 1)`, so
 a neutral pair leaves the image alone.
 
 The branch ships a checkpoint trained under it, at **24.18 dB / 0.917 SSIM**
-over 500 FiveK test images.
+over 500 FiveK test images on the reconstructed split, and a second checkpoint
+at **23.83 dB / 0.916 SSIM** on the original DPE split, so both of the
+protocols this README distinguishes have a checkpoint trained under it.
 
 ## Everything else
 
-**Model** (three commits, gradients and geometry only, forward values
-unchanged): the binarisation's straight-through estimator reaches autograd; the
-graduated filter's branch selection is differentiable, so its inversion
-indicator trains; ellipse 2's three channels share one geometry.
+**Model** (four commits, gradients and geometry only): the binarisation's
+straight-through estimator reaches autograd; the graduated filter's branch
+selection is differentiable, so its inversion indicator trains; ellipse 2's
+three channels share one geometry; and the graduated filter's central line has
+its own intercept, with the lower offset expressed as a fraction of the upper,
+which gives each of its fifteen line-geometry outputs a path to the loss and
+removes the two clamps that bounded them against each other. That last commit
+also drops four modules `UNet.__init__` built and never used, whose ten
+state-dict entries stopped the shipped checkpoint loading with `strict=True`.
 
 **Loss:** MS-SSIM's top-scale term enters the product once.
 
@@ -60,7 +67,7 @@ instead.
 
 Run on CPU (Python 3.11, torch 2.12, scikit-image 0.26, numpy 2.4).
 
-- 44 tests pass, eight of them covering the model and loss updates.
+- 45 tests pass, nine of them covering the model and loss updates.
 - The refactor, batching and dead-code commits are bitwise identical to the
   tree before them: 90 state-dict keys in the same order, forward and loss
   max difference 0, gradients 3.7e-09.
