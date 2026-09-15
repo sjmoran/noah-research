@@ -134,6 +134,7 @@ and argued with rather than only looked at. The
 | Model | Split | PSNR | SSIM |
 |---|---|---|---|
 | the checkpoint in this directory, 1000 epochs | reconstructed | 24.18 dB | 0.917 |
+| the checkpoint in this directory, 774 epochs | DPE | 23.83 dB | 0.916 |
 | DeepLPF as published (NamedCurves Tab. 1) | DPE | 23.93 dB | 0.903 |
 
 FiveK has at least five incompatible protocols; see [Which number, which
@@ -142,7 +143,12 @@ protocol](#which-number-which-protocol) before comparing anything to anything.
 ## Pre-trained model
 
 `pretrained_models/adobe_dpe/` holds the model trained by this code for 1000
-epochs, and it is what `deeplpf enhance` loads by default.
+epochs on the reconstructed split, and it is what `deeplpf enhance` loads by
+default.
+
+`pretrained_models/adobe_dpe_recovered_split/` holds a second checkpoint,
+trained on the original DPE split lists, at the epoch where validation PSNR
+peaked (774). Same architecture and training command, different split.
 
 Two capabilities are off by default. Both change the architecture, so a
 checkpoint trained with either needs the same flag to load it:
@@ -190,6 +196,8 @@ The split lists, the Lightroom export recipe, the dataset organise and verify
 scripts, and the reference manifest that checks an export image by image, live
 in the maintained mirror at
 [sjmoran/deeplpf-image-enhancement](https://github.com/sjmoran/deeplpf-image-enhancement),
+tagged
+[v1.0.0](https://github.com/sjmoran/deeplpf-image-enhancement/releases/tag/v1.0.0),
 which is where the checkpoint above was trained.
 
 ## Which number, which protocol
